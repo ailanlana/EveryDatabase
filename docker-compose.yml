@@ -2,44 +2,44 @@
 #  EverNifeCore - Integration test database suite
 # ======================================================================
 #
-# Sobe os 3 servidores de banco usados pelos testes de integracao do modulo
-# :common-tests. As credenciais e portas batem com os defaults de
-# DotEnvTestUtil em cada *StorageTest - se voce nao setar nenhuma env var,
-# os testes conectam automaticamente nestes containers.
+# Starts the 3 database servers used by the integration tests in the
+# :common-tests module. Credentials and ports match the defaults in
+# DotEnvTestUtil for each *StorageTest - if you don't set any env vars,
+# the tests will connect automatically to these containers.
 #
 # ----------------------------------------------------------------------
-#  Como usar
+#  How to use
 # ----------------------------------------------------------------------
-#   # Subir todos os bancos em background:
+#   # Start all databases in the background:
 #   docker compose up -d
 #
-#   # Acompanhar logs de inicializacao:
+#   # Watch initialization logs:
 #   docker compose logs -f
 #
-#   # Ver status / healthcheck de cada container:
+#   # Check status / healthcheck of each container:
 #   docker compose ps
 #
-#   # Subir apenas um servico:
+#   # Start only one service:
 #   docker compose up -d postgres
 #
-#   # Parar mantendo os dados:
+#   # Stop while keeping data:
 #   docker compose stop
 #
-#   # Parar e remover containers (mantem os volumes):
+#   # Stop and remove containers (volumes are kept):
 #   docker compose down
 #
-#   # Wipe total - apaga volumes (mata os dados):
+#   # Full wipe - deletes volumes (destroys all data):
 #   docker compose down -v
 #
 # ----------------------------------------------------------------------
-#  Portas expostas no host
+#  Ports exposed on the host
 # ----------------------------------------------------------------------
 #   MongoDB     -> 27017
-#   MariaDB     -> 3306     (wire-compatible com MySQL)
+#   MariaDB     -> 3306     (wire-compatible with MySQL)
 #   PostgreSQL  -> 5432
 #
 # ----------------------------------------------------------------------
-#  Credenciais
+#  Credentials
 # ----------------------------------------------------------------------
 #   MongoDB     -> root / root
 #   MariaDB     -> root / root
@@ -47,14 +47,12 @@
 #
 # ======================================================================
 
-# Nome do "stack" no Docker Desktop / `docker compose ls`.
-# Sem isso, o Docker usa o nome do diretorio (e o plugin Gradle usa um hash feio).
 name: evernifecore-space
 
 services:
 
   # --------------------------------------------------------------------
-  #  MongoDB 7  -  usado por MongoStorageTest
+  #  MongoDB 7  -  used by MongoStorageTest
   # --------------------------------------------------------------------
   mongo:
     image: mongo:7
@@ -79,11 +77,11 @@ services:
       start_period: 20s
 
   # --------------------------------------------------------------------
-  #  MariaDB 11  -  usado por MariaDbStorageTest
+  #  MariaDB 11  -  used by MariaDbStorageTest
   #
-  #  Wire-compatible com MySQL: o driver mysql-connector-j conecta nele
-  #  normalmente via jdbc:mysql://localhost:3306. Cobre tambem servidores
-  #  MySQL reais que o usuario do plugin venha a usar.
+  #  Wire-compatible with MySQL: the mysql-connector-j driver connects
+  #  to it normally via jdbc:mysql://localhost:3306. Also covers real
+  #  MySQL servers that plugin users may run.
   # --------------------------------------------------------------------
   mariadb:
     image: mariadb:11
@@ -105,7 +103,7 @@ services:
       start_period: 20s
 
   # --------------------------------------------------------------------
-  #  PostgreSQL 16  -  usado por PostgreSqlStorageTest
+  #  PostgreSQL 16  -  used by PostgreSqlStorageTest
   # --------------------------------------------------------------------
   postgres:
     image: postgres:16
@@ -128,7 +126,7 @@ services:
       start_period: 10s
 
 # ----------------------------------------------------------------------
-#  Volumes nomeados - sobrevivem a `down`, somem com `down -v`.
+#  Named volumes - survive `down`, deleted with `down -v`.
 # ----------------------------------------------------------------------
 volumes:
   mongo_data:
@@ -139,8 +137,8 @@ volumes:
     name: evernifecore-postgres-data
 
 # ----------------------------------------------------------------------
-#  Rede comum - util se algum dia voce quiser ligar containers entre si
-#  (ex.: rodar Adminer/pgAdmin no mesmo compose).
+#  Shared network - useful if you ever want to link containers together
+#  (e.g.: run Adminer/pgAdmin in the same compose).
 # ----------------------------------------------------------------------
 networks:
   evernifecore-test:
