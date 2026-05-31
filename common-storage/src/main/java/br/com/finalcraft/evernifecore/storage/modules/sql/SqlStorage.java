@@ -5,13 +5,17 @@ import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.HealthStatus;
 import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.Storage;
+import br.com.finalcraft.evernifecore.storage.schema.Migration;
+import br.com.finalcraft.evernifecore.storage.schema.MigrationContext;
+import br.com.finalcraft.evernifecore.storage.schema.SchemaAwareStorage;
+import br.com.finalcraft.evernifecore.storage.schema.SchemaVersion;
 import br.com.finalcraft.evernifecore.storage.tx.TransactionScope;
 import br.com.finalcraft.evernifecore.storage.tx.TransactionalStorage;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
-import java.sql.Connection;
-import java.sql.SQLException;
+import java.sql.*;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -24,11 +28,41 @@ import java.util.function.Function;
  * {@link ThreadLocal}) with auto-commit disabled.
  * Commit happens on success; rollback happens on exception or {@link TransactionScope#rollback()}.
  *
- * <p>The default upsert dialect is MySQL/MariaDB ({@code ON DUPLICATE KEY UPDATE}).
- * For other dialects, subclass and override {@link #createRepository(EntityDescriptor)} to return
- * a dialect-specific {@link SqlRepository} subclass (e.g. {@code PostgreSqlRepository}).
+ * <p>Implements {@link SchemaAwareStorage}: applied migrations are tracked in the
+ * reserved {@value #MIGRATIONS_TABLE} table. Register migrations with
+ * {@link #register(List)} before calling {@link #migrate()}.
+ *
+ * <p>The default SQL dialect is MySQL/MariaDB (backtick quoting, {@code MEDIUMTEXT},
+ * {@code ON DUPLICATE KEY UPDATE}).
+ * Subclasses override {@link #q(String)} and {@link #createRepository(EntityDescriptor)} to
+ * provide dialect-specific behaviour (e.g. {@code PostgreSqlStorage}, {@code H2SqlStorage}).
+ *
+ * <h3>SchemaAware + auto-create coexistence</h3>
+ * Both mechanisms exist and are complementary - they do NOT conflict:
+ * <ul>
+ *   <li>{@code createTableIfAbsent()} - auto-creates the entity table when
+ *       {@link #repository(EntityDescriptor)} is first called. Idempotent, always active.</li>
+ *   <li>{@link #migrate()} - applies custom DDL/DML registered via {@link #register(List)}.
+ *       Used for backfills, auxiliary tables, views, constraints and anything
+ *       {@code createTableIfAbsent} does not cover.</li>
+ * </ul>
+ *
+ * <h3>DDL and auto-commit (MySQL/MariaDB)</h3>
+ * DDL statements cause an implicit commit in MySQL/MariaDB, so running a migration
+ * and recording it in {@value #MIGRATIONS_TABLE} is NOT atomic. If the process dies
+ * between the DDL and the INSERT, the migration re-runs on next startup.
+ * <b>Write all migrations idempotent</b> ({@code CREATE TABLE IF NOT EXISTS},
+ * {@code CREATE INDEX IF NOT EXISTS}, upsert DML) so re-execution is harmless.
+ *
+ * <h3>Concurrent startup</h3>
+ * {@code PRIMARY KEY (version)} on {@value #MIGRATIONS_TABLE} prevents double-insertion
+ * when multiple servers run {@link #migrate()} simultaneously. Idempotent DDL absorbs
+ * the race on the actual schema changes.
  */
-public class SqlStorage implements Storage, TransactionalStorage {
+public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareStorage {
+
+    /** Reserved table used to record applied migration versions. */
+    static final String MIGRATIONS_TABLE = "_schema_migrations";
 
     private final SqlConfig config;
     private HikariDataSource dataSource;
@@ -38,6 +72,9 @@ public class SqlStorage implements Storage, TransactionalStorage {
 
     /** Cache of initialised repositories (table is guaranteed to exist). */
     private final ConcurrentHashMap<String, SqlRepository<?, ?>> repositories = new ConcurrentHashMap<>();
+
+    /** Registered migrations, sorted by version. Mutated only before migrate() is called. */
+    private final List<Migration> registeredMigrations = new ArrayList<>();
 
     public SqlStorage(SqlConfig config) {
         this.config = config;
@@ -98,15 +135,30 @@ public class SqlStorage implements Storage, TransactionalStorage {
     }
 
     // ------------------------------------------------------------------
+    //  Dialect quoting
+    // ------------------------------------------------------------------
+
+    /**
+     * Wraps an SQL identifier in the dialect's quoting character.
+     *
+     * <p>Default: backtick for MySQL/MariaDB (e.g. {@code `version`}).
+     * Subclasses ({@code PostgreSqlStorage}, {@code H2SqlStorage}) override this
+     * to return the dialect-appropriate quoting (double-quote for ANSI SQL).
+     *
+     * <p>This method is used by the SchemaAware migration infrastructure in this class.
+     * {@link SqlRepository} has its own parallel {@code q()} for entity table DDL/DML.
+     */
+    protected String q(String identifier) {
+        return "`" + identifier + "`";
+    }
+
+    // ------------------------------------------------------------------
     //  Repository factory
     // ------------------------------------------------------------------
 
     /**
      * Exposes the active {@link javax.sql.DataSource} to subclasses without leaking the
      * HikariCP-specific type into the public API.
-     *
-     * <p>Subclasses that override {@link #createRepository} should obtain the DataSource
-     * via this method rather than a direct field reference.
      */
     protected javax.sql.DataSource getDataSource() {
         return dataSource;
@@ -175,5 +227,152 @@ public class SqlStorage implements Storage, TransactionalStorage {
                 try { conn.setAutoCommit(true); conn.close(); } catch (SQLException ignored) {}
             }
         }, StorageExecutors.async());
+    }
+
+    // ------------------------------------------------------------------
+    //  SchemaAwareStorage
+    // ------------------------------------------------------------------
+
+    @Override
+    public SchemaAwareStorage register(List<Migration> migrations) {
+        registeredMigrations.addAll(migrations);
+        registeredMigrations.sort(Comparator.comparing(Migration::version));
+        return this;
+    }
+
+    @Override
+    public CompletableFuture<SchemaVersion> currentVersion() {
+        return CompletableFuture.supplyAsync(() -> {
+            try (Connection conn = dataSource.getConnection()) {
+                ensureMigrationsTable(conn);
+                String sql = "SELECT " + q("version") + ", " + q("applied_at")
+                           + " FROM " + q(MIGRATIONS_TABLE)
+                           + " ORDER BY " + q("version") + " DESC LIMIT 1";
+                try (Statement stmt = conn.createStatement();
+                     ResultSet rs = stmt.executeQuery(sql)) {
+                    if (!rs.next()) return SchemaVersion.none();
+                    return new SchemaVersion(rs.getString(1), rs.getLong(2));
+                }
+            } catch (SQLException e) {
+                throw new RuntimeException("SQL: currentVersion() failed", e);
+            }
+        }, StorageExecutors.async());
+    }
+
+    @Override
+    public CompletableFuture<List<Migration>> pending() {
+        return CompletableFuture.supplyAsync(() -> {
+            try (Connection conn = dataSource.getConnection()) {
+                ensureMigrationsTable(conn);
+                Set<String> applied = readAppliedVersions(conn);
+                List<Migration> result = new ArrayList<>();
+                for (Migration m : registeredMigrations) {
+                    if (!applied.contains(m.version())) result.add(m);
+                }
+                return result;
+            } catch (SQLException e) {
+                throw new RuntimeException("SQL: pending() failed", e);
+            }
+        }, StorageExecutors.async());
+    }
+
+    @Override
+    public CompletableFuture<Void> migrate() {
+        return CompletableFuture.supplyAsync(() -> {
+            try (Connection conn = dataSource.getConnection()) {
+                ensureMigrationsTable(conn);
+                Set<String> applied = readAppliedVersions(conn);
+                MigrationContext ctx = new SqlMigrationContext(conn);
+
+                for (Migration m : registeredMigrations) {
+                    if (applied.contains(m.version())) continue;
+
+                    try {
+                        m.execute(ctx);
+                    } catch (Exception e) {
+                        throw new RuntimeException(
+                            "SQL migration " + m.version()
+                            + " [" + m.description() + "] failed", e);
+                    }
+
+                    recordApplied(conn, m);
+                }
+                return null;
+            } catch (SQLException e) {
+                throw new RuntimeException("SQL: migrate() failed", e);
+            }
+        }, StorageExecutors.async());
+    }
+
+    // ------------------------------------------------------------------
+    //  SchemaAware private helpers
+    // ------------------------------------------------------------------
+
+    /**
+     * Creates the migrations tracking table if it does not exist yet.
+     * Called lazily from every SchemaAware method - idempotent.
+     */
+    private void ensureMigrationsTable(Connection conn) throws SQLException {
+        String sql = "CREATE TABLE IF NOT EXISTS " + q(MIGRATIONS_TABLE) + " ("
+                   + q("version")     + " VARCHAR(255) NOT NULL, "
+                   + q("description") + " VARCHAR(255), "
+                   + q("applied_at")  + " BIGINT NOT NULL, "
+                   + "PRIMARY KEY (" + q("version") + "))";
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute(sql);
+        }
+    }
+
+    /** Reads all applied version strings from the migrations tracking table. */
+    private Set<String> readAppliedVersions(Connection conn) throws SQLException {
+        Set<String> applied = new HashSet<>();
+        String sql = "SELECT " + q("version") + " FROM " + q(MIGRATIONS_TABLE);
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) applied.add(rs.getString(1));
+        }
+        return applied;
+    }
+
+    /** Inserts a record into the migrations tracking table for the given migration. */
+    private void recordApplied(Connection conn, Migration m) throws SQLException {
+        String sql = "INSERT INTO " + q(MIGRATIONS_TABLE) + " ("
+                   + q("version") + ", " + q("description") + ", " + q("applied_at")
+                   + ") VALUES (?, ?, ?)";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, m.version());
+            ps.setString(2, m.description());
+            ps.setLong(3, System.currentTimeMillis());
+            ps.executeUpdate();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  Private: MigrationContext implementation for SQL
+    // ------------------------------------------------------------------
+
+    /**
+     * Passes the dedicated migration {@link Connection} to {@link Migration#execute(MigrationContext)}.
+     *
+     * <p>All migrations in a single {@link #migrate()} call share the same connection so they
+     * see a consistent view of the schema. This is a dedicated connection from the pool,
+     * separate from any {@link TransactionalStorage#inTransaction} scope.
+     */
+    private static final class SqlMigrationContext implements MigrationContext {
+
+        private final Connection conn;
+
+        SqlMigrationContext(Connection conn) {
+            this.conn = conn;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <T> T getNativeClient(Class<T> type) {
+            if (type.isInstance(conn)) return (T) conn;
+            throw new IllegalArgumentException(
+                "SqlStorage migration context does not provide: " + type.getName()
+                + " (available: " + Connection.class.getName() + ")");
+        }
     }
 }

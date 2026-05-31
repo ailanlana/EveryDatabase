@@ -14,9 +14,31 @@ import java.util.concurrent.CompletableFuture;
  * keeps its own record of applied versions (e.g. a {@code _schema_migrations} table
  * in SQL, a {@code _schema_migrations} collection in Mongo).
  *
- * <h3>Typical usage</h3>
+ * <h3>Supported backends</h3>
+ * <ul>
+ *   <li>{@code SqlStorage} (MariaDB / MySQL) - tracks applied migrations in a
+ *       {@code _schema_migrations} table; migration authors use {@code SqlMigration}.</li>
+ *   <li>{@code PostgreSqlStorage} / {@code H2SqlStorage} - inherit from {@code SqlStorage}.</li>
+ *   <li>{@code MongoStorage} - tracks in a {@code _schema_migrations} collection;
+ *       migration authors use {@code MongoMigration}.</li>
+ *   <li>{@code LocalFileStorage} - tracks in a metadata file;
+ *       migration authors use {@code LocalFileMigration}.</li>
+ * </ul>
+ *
+ * <h3>Typical usage (SQL)</h3>
+ * <pre>{@code
+ * SqlStorage sql = Storages.createSQL(new SqlConfig("jdbc:mariadb://localhost/mc", "root", "pass"));
+ * sql.init().join();
+ *
+ * sql.register(V001_CreateAuditLog.INSTANCE, V002_BackfillScores.INSTANCE)
+ *    .migrate()
+ *    .join();
+ * }</pre>
+ *
+ * <h3>Typical usage (generic - works for any SchemaAware backend)</h3>
  * <pre>{@code
  * Storage storage = Storages.create(config);
+ * storage.init().join();
  *
  * if (storage instanceof SchemaAwareStorage) {
  *     ((SchemaAwareStorage) storage)
@@ -24,8 +46,6 @@ import java.util.concurrent.CompletableFuture;
  *         .migrate()
  *         .join();
  * }
- *
- * storage.init().join();
  * }</pre>
  */
 public interface SchemaAwareStorage extends Storage {

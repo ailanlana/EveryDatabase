@@ -31,6 +31,16 @@ public class PostgreSqlStorage extends SqlStorage {
         super(config);
     }
 
+    /**
+     * PostgreSQL uses ANSI double-quote for identifier quoting.
+     * Overrides the base class backtick default so the {@code _schema_migrations}
+     * table and its columns are quoted correctly.
+     */
+    @Override
+    protected String q(String identifier) {
+        return "\"" + identifier + "\"";
+    }
+
     @Override
     protected <K, V> SqlRepository<K, V> createRepository(EntityDescriptor<K, V> descriptor) {
         return new PostgreSqlRepository<>(descriptor, getDataSource(), txConnection);

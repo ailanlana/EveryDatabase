@@ -33,6 +33,16 @@ public class H2SqlStorage extends SqlStorage {
         super(config);
     }
 
+    /**
+     * H2 uses ANSI double-quote for identifier quoting (same as PostgreSQL).
+     * Overrides the base class backtick default so the {@code _schema_migrations}
+     * table and its columns are quoted correctly.
+     */
+    @Override
+    protected String q(String identifier) {
+        return "\"" + identifier + "\"";
+    }
+
     @Override
     protected <K, V> SqlRepository<K, V> createRepository(EntityDescriptor<K, V> descriptor) {
         return new H2SqlRepository<>(descriptor, getDataSource(), txConnection);
