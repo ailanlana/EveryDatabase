@@ -172,19 +172,20 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     // ------------------------------------------------------------------
 
     /**
-     * Creates the table (idempotent) and ensures every declared {@code _idx_*} column and
-     * its B-tree index exist.
+     * Creates the table (idempotent) and reconciles its {@code _idx_*} columns and B-tree
+     * indexes with the descriptor's declared {@link IndexHint}s on every call.
      *
-     * <p><b>Schema-drift handling:</b> {@code CREATE TABLE IF NOT EXISTS} is a no-op when the
-     * table already exists. {@link #ensureIndexColumn} then checks each hint column via JDBC
-     * metadata and issues {@code ALTER TABLE ADD COLUMN} for any column that is missing.
-     * This covers the common case of adding a new {@link IndexHint} to an existing deployment
-     * without a manual migration.
-     *
-     * <p><b>Backfill note:</b> newly added columns are initially {@code NULL} for pre-existing
-     * rows. Queries on those rows will not match until the entities are re-saved (which populates
-     * the column). A full backfill can be done via a {@code Migration} that calls
-     * {@code repo.saveAll(repo.all().join().collect(...))} after this init step.
+     * <ol>
+     *   <li>{@code CREATE TABLE IF NOT EXISTS} - no-op when the table already exists.</li>
+     *   <li>Add any declared {@code _idx_*} column that is missing ({@link #ensureIndexColumn}) -
+     *       covers adding a new {@link IndexHint} to an existing deployment.</li>
+     *   <li>Create the B-tree index for every declared hint ({@link #createIndexIfAbsent}).</li>
+     *   <li><b>Enforcement:</b> drop every {@code _idx_*} index and column that is no longer
+     *       declared ({@link #dropUndeclaredIndexes}).</li>
+     *   <li><b>Auto-populate:</b> backfill the columns added in step 2 from the existing rows'
+     *       stored JSON ({@link #backfillIndexColumns}), so queries on a freshly added index
+     *       return correct results without waiting for each entity to be re-saved.</li>
+     * </ol>
      */
     protected void createTableIfAbsent(Connection conn) throws SQLException {
         // --- Step 1: create base table (no-op if already exists) ---
@@ -205,15 +206,22 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             stmt.execute(sql.toString());
         }
 
-        // --- Step 2: add any missing _idx_* columns (schema-drift after new IndexHint added) ---
+        // --- Step 2: add any missing _idx_* columns, remembering which were actually added ---
+        List<IndexHint> addedColumns = new ArrayList<>();
         for (IndexHint hint : indexes) {
-            ensureIndexColumn(conn, hint);
+            if (ensureIndexColumn(conn, hint)) addedColumns.add(hint);
         }
 
         // --- Step 3: create B-tree indexes (separate DDL - inline INDEX is MySQL-specific) ---
         for (IndexHint hint : indexes) {
             createIndexIfAbsent(conn, hint);
         }
+
+        // --- Step 4: enforcement - drop _idx_* indexes/columns no longer declared ---
+        dropUndeclaredIndexes(conn);
+
+        // --- Step 5: auto-populate freshly added columns from the existing rows ---
+        if (!addedColumns.isEmpty()) backfillIndexColumns(conn, addedColumns);
     }
 
     /**
@@ -221,14 +229,18 @@ public class SqlRepository<K, V> implements Repository<K, V> {
      *
      * <p>Uses {@link DatabaseMetaData#getColumns} for a portable existence check that works
      * on all supported dialects (MariaDB, PostgreSQL, H2) regardless of identifier-case rules.
+     *
+     * @return {@code true} when the column was actually added (so the caller can backfill it),
+     *         {@code false} when it already existed.
      */
-    protected void ensureIndexColumn(Connection conn, IndexHint hint) throws SQLException {
-        if (indexColumnExists(conn, hint)) return;
+    protected boolean ensureIndexColumn(Connection conn, IndexHint hint) throws SQLException {
+        if (indexColumnExists(conn, hint)) return false;
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("ALTER TABLE " + q(tableName())
                 + " ADD COLUMN " + q(hint.indexColumnName())
                 + " " + sqlTypeFor(hint));
         }
+        return true;
     }
 
     /**
@@ -253,17 +265,146 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     }
 
     /**
-     * Issues {@code CREATE [UNIQUE] INDEX IF NOT EXISTS} on the sibling column.
+     * Issues {@code CREATE INDEX IF NOT EXISTS} on the sibling column.
      * Works on PostgreSQL 9.5+, MySQL 8.0.29+, MariaDB 10.0+, H2.
      */
     protected void createIndexIfAbsent(Connection conn, IndexHint hint) throws SQLException {
         String name = "idx_" + tableName() + "_" + hint.fieldPath().replace('.', '_');
-        String sql = "CREATE " + (hint.unique() ? "UNIQUE " : "") + "INDEX IF NOT EXISTS "
+        String sql = "CREATE INDEX IF NOT EXISTS "
             + q(name) + " ON " + q(tableName())
             + " (" + q(hint.indexColumnName()) + indexLengthFor(hint)
             + (hint.order() == IndexHint.Order.DESCENDING ? " DESC" : "") + ")";
         try (Statement stmt = conn.createStatement()) {
             stmt.execute(sql);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  Index enforcement (drop) + auto-populate (backfill)
+    // ------------------------------------------------------------------
+
+    /**
+     * Drops every {@code _idx_*} index and its backing column that is no longer declared on the
+     * descriptor. The complement of {@link #createIndexIfAbsent}/{@link #ensureIndexColumn}:
+     * together they keep the persisted index set exactly matching the declared {@link IndexHint}s.
+     *
+     * <p>Indexes are dropped first (via {@link #dropIndex}) so the subsequent {@code DROP COLUMN}
+     * cannot fail on databases that refuse to drop a still-indexed column.
+     */
+    protected void dropUndeclaredIndexes(Connection conn) throws SQLException {
+        Set<String> declared = new HashSet<>();
+        for (IndexHint hint : indexes) declared.add(hint.indexColumnName().toLowerCase(Locale.ROOT));
+
+        // Drop indexes backed by an _idx_ column that is no longer declared.
+        for (Map.Entry<String, String> entry : existingIndexColumns(conn).entrySet()) {
+            if (!declared.contains(entry.getValue().toLowerCase(Locale.ROOT))) {
+                dropIndex(conn, entry.getKey());
+            }
+        }
+        // Drop the now-orphaned _idx_ columns themselves.
+        for (String column : existingIndexColumnNames(conn)) {
+            if (!declared.contains(column.toLowerCase(Locale.ROOT))) {
+                try (Statement stmt = conn.createStatement()) {
+                    stmt.execute("ALTER TABLE " + q(tableName()) + " DROP COLUMN " + q(column));
+                }
+            }
+        }
+    }
+
+    /**
+     * Drops an index by its exact (metadata-reported) name. Default dialect (MySQL/MariaDB)
+     * requires the {@code ON <table>} qualifier; PostgreSQL and H2 override to omit it.
+     */
+    protected void dropIndex(Connection conn, String indexName) throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("DROP INDEX " + q(indexName) + " ON " + q(tableName()));
+        }
+    }
+
+    /**
+     * Returns {@code indexName -> backing column} for every index whose column is an
+     * {@code _idx_*} sibling column. The primary-key index (on {@link #COL_KEY}) is skipped.
+     */
+    private Map<String, String> existingIndexColumns(Connection conn) throws SQLException {
+        Map<String, String> result = new LinkedHashMap<>();
+        DatabaseMetaData meta = conn.getMetaData();
+        for (String tbl : new String[]{tableName(), tableName().toUpperCase(Locale.ROOT)}) {
+            try (ResultSet rs = meta.getIndexInfo(null, null, tbl, false, false)) {
+                while (rs.next()) {
+                    String idxName = rs.getString("INDEX_NAME");
+                    String colName = rs.getString("COLUMN_NAME");
+                    if (idxName == null || colName == null) continue;
+                    if (colName.toLowerCase(Locale.ROOT).startsWith("_idx_")) {
+                        result.put(idxName, colName);
+                    }
+                }
+            }
+            if (!result.isEmpty()) break; // first table-name variant that resolves wins
+        }
+        return result;
+    }
+
+    /** Returns the names of all {@code _idx_*} columns currently present on the table. */
+    private List<String> existingIndexColumnNames(Connection conn) throws SQLException {
+        List<String> result = new ArrayList<>();
+        DatabaseMetaData meta = conn.getMetaData();
+        for (String tbl : new String[]{tableName(), tableName().toUpperCase(Locale.ROOT)}) {
+            try (ResultSet rs = meta.getColumns(null, null, tbl, null)) {
+                while (rs.next()) {
+                    String col = rs.getString("COLUMN_NAME");
+                    if (col == null || !col.toLowerCase(Locale.ROOT).startsWith("_idx_")) continue;
+                    boolean dup = false;
+                    for (String seen : result) if (seen.equalsIgnoreCase(col)) { dup = true; break; }
+                    if (!dup) result.add(col);
+                }
+            }
+            if (!result.isEmpty()) break;
+        }
+        return result;
+    }
+
+    /**
+     * Auto-populates freshly added {@code _idx_*} columns for all pre-existing rows.
+     *
+     * <p>Reads each row's stored JSON, extracts the index value via the same
+     * {@link IndexValueExtractor} used at {@code save()} time, and writes it into the new
+     * column(s). Only the columns in {@code newHints} are touched; existing index columns are
+     * left as-is. Rows whose JSON cannot be decoded are skipped (consistent with
+     * {@link #readEntities}).
+     */
+    protected void backfillIndexColumns(Connection conn, List<IndexHint> newHints) throws SQLException {
+        StringBuilder update = new StringBuilder("UPDATE ").append(q(tableName())).append(" SET ");
+        for (int i = 0; i < newHints.size(); i++) {
+            if (i > 0) update.append(", ");
+            update.append(q(newHints.get(i).indexColumnName())).append(" = ?");
+        }
+        update.append(" WHERE ").append(q(COL_KEY)).append(" = ?");
+
+        String select = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName());
+
+        try (Statement selectStmt = conn.createStatement();
+             ResultSet rs = selectStmt.executeQuery(select);
+             PreparedStatement ps = conn.prepareStatement(update.toString())) {
+            int batched = 0;
+            while (rs.next()) {
+                String key  = rs.getString(1);
+                String json = rs.getString(2);
+                V entity;
+                try {
+                    entity = descriptor.codec().decode(json.getBytes(StandardCharsets.UTF_8));
+                } catch (CodecException e) {
+                    continue; // skip undecodable rows
+                }
+                JsonNode tree = IndexValueExtractor.toTree(entity);
+                int slot = 1;
+                for (IndexHint hint : newHints) {
+                    ps.setObject(slot++, toJdbcValue(IndexValueExtractor.extract(tree, hint), hint));
+                }
+                ps.setString(slot, key);
+                ps.addBatch();
+                batched++;
+            }
+            if (batched > 0) ps.executeBatch();
         }
     }
 

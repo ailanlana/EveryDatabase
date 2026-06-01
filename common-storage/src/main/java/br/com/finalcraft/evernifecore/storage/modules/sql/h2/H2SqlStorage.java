@@ -76,6 +76,14 @@ public class H2SqlStorage extends SqlStorage {
             return "";
         }
 
+        /** H2 drops indexes by name without a table qualifier. */
+        @Override
+        protected void dropIndex(Connection conn, String indexName) throws java.sql.SQLException {
+            try (java.sql.Statement stmt = conn.createStatement()) {
+                stmt.execute("DROP INDEX IF EXISTS " + q(indexName));
+            }
+        }
+
         @Override
         protected String dataColumnType() {
             return "TEXT";

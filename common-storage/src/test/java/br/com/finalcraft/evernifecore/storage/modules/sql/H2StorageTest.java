@@ -13,6 +13,10 @@ import br.com.finalcraft.evernifecore.storage.query.Query;
 import br.com.finalcraft.evernifecore.storage.tx.TransactionalStorage;
 import org.junit.jupiter.api.*;
 
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
@@ -314,8 +318,8 @@ class H2StorageTest extends AbstractStorageTest {
 
     @Test
     @Order(1060)
-    @DisplayName("ensureIndexColumn: new IndexHint added after table creation is automatically ALTERed in")
-    void schemaEvolution_newIndexHint_columnAddedAutomatically() {
+    @DisplayName("ensureIndexColumn + auto-populate: new IndexHint is ALTERed in and backfilled from existing rows")
+    void schemaEvolution_newIndexHint_columnAddedAndBackfilled() {
         // V1 and V2 share the same in-memory database as the main storage for this test method.
         // They use a distinct collection name ("schema_evolution") to avoid colliding with
         // the "test_players" table used by the inherited contract tests.
@@ -353,16 +357,79 @@ class H2StorageTest extends AbstractStorageTest {
             () -> storageV2.repository(v2),
             "repository() with a new IndexHint must not throw - ensureIndexColumn should ADD the column");
 
-        // Alice exists with NULL in _idx_score (not yet re-saved) - but basic CRUD still works.
+        // Alice is still readable, and basic CRUD works.
         assertTrue(repoV2.find(UUID_ALICE).join().isPresent(), "Alice must still be readable after ALTER");
         assertEquals(1L, repoV2.count().join());
 
-        // Re-save Alice to backfill _idx_score, then query by score.
-        repoV2.save(alice()).join();
+        // Auto-populate: opening V2 backfilled _idx_score for the pre-existing Alice row, so she is
+        // findable via the brand-new score index WITHOUT being re-saved first.
         List<TestPlayer> found = repoV2.query(Query.eq("score", 100)).join();
-        assertEquals(1, found.size(), "After re-save, Alice must be findable via the new score index");
+        assertEquals(1, found.size(),
+            "Auto-populate must backfill the new score index so Alice is found without a re-save");
         assertEquals(UUID_ALICE, found.get(0).getUuid());
 
         storageV2.close().join();
+    }
+
+    @Test
+    @Order(1061)
+    @DisplayName("enforcement: an IndexHint removed from the descriptor drops its _idx_ column and index")
+    void schemaEnforcement_removedIndexHint_columnAndIndexDropped() throws Exception {
+        // --- V1 descriptor: BOTH "name" and "score" indexed ---
+        EntityDescriptor<UUID, TestPlayer> v1 = EntityDescriptor.builder(UUID.class, TestPlayer.class)
+            .collection("schema_enforcement")
+            .keyExtractor(TestPlayer::getUuid)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class))
+            .index(IndexHint.string("name"))
+            .index(IndexHint.integer("score"))
+            .build();
+
+        H2SqlStorage storageV1 = new H2SqlStorage(
+            new SqlConfig(currentTestDbUrl, "sa", "", TEST_POOL, Optional.empty()));
+        storageV1.init().join();
+        storageV1.repository(v1).save(alice()).join();
+        storageV1.close().join();
+
+        assertTrue(indexColumnPresent("schema_enforcement", "_idx_score"),
+            "Precondition: _idx_score must exist after V1 created the table");
+
+        // --- V2 descriptor: only "name" indexed ("score" removed) ---
+        EntityDescriptor<UUID, TestPlayer> v2 = EntityDescriptor.builder(UUID.class, TestPlayer.class)
+            .collection("schema_enforcement")
+            .keyExtractor(TestPlayer::getUuid)
+            .codec(new JacksonJsonCodec<>(TestPlayer.class))
+            .index(IndexHint.string("name"))
+            .build();
+
+        H2SqlStorage storageV2 = new H2SqlStorage(
+            new SqlConfig(currentTestDbUrl, "sa", "", TEST_POOL, Optional.empty()));
+        storageV2.init().join();
+        Repository<UUID, TestPlayer> repoV2 = storageV2.repository(v2);
+
+        // Enforcement must have dropped the undeclared _idx_score column (its index goes with it).
+        assertFalse(indexColumnPresent("schema_enforcement", "_idx_score"),
+            "Enforcement must drop the _idx_score column that is no longer declared");
+
+        // The still-declared name index keeps working and the data is intact.
+        assertEquals(1L, repoV2.count().join());
+        assertEquals(1, repoV2.query(Query.eq("name", "Alice")).join().size(),
+            "The retained name index must still return Alice");
+
+        storageV2.close().join();
+    }
+
+    /** Opens a direct JDBC connection to the current test database and reports whether a column exists. */
+    private boolean indexColumnPresent(String table, String column) throws Exception {
+        try (Connection conn = DriverManager.getConnection(currentTestDbUrl, "sa", "")) {
+            DatabaseMetaData meta = conn.getMetaData();
+            for (String tbl : new String[]{table, table.toUpperCase()}) {
+                try (ResultSet rs = meta.getColumns(null, null, tbl, null)) {
+                    while (rs.next()) {
+                        if (column.equalsIgnoreCase(rs.getString("COLUMN_NAME"))) return true;
+                    }
+                }
+            }
+            return false;
+        }
     }
 }

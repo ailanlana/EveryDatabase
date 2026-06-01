@@ -1,5 +1,6 @@
 package br.com.finalcraft.evernifecore.storage.query;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -33,7 +34,6 @@ import java.util.regex.Pattern;
  * IndexHint.integer("location.x")
  *
  * // Modifiers:
- * IndexHint.string("email").asUnique()
  * IndexHint.integer("score").asDescending()
  * }</pre>
  *
@@ -86,9 +86,8 @@ public final class IndexHint {
     private final String    fieldPath;
     private final FieldType fieldType;
     private final Order     order;
-    private final boolean   unique;
 
-    private IndexHint(String fieldPath, FieldType fieldType, Order order, boolean unique) {
+    private IndexHint(String fieldPath, FieldType fieldType, Order order) {
         if (fieldPath == null || !VALID_FIELD_PATH.matcher(fieldPath).matches()) {
             throw new IllegalArgumentException(
                 "IndexHint field path '" + fieldPath + "' is invalid. " +
@@ -99,40 +98,39 @@ public final class IndexHint {
         this.fieldPath = fieldPath;
         this.fieldType = Objects.requireNonNull(fieldType, "fieldType");
         this.order     = Objects.requireNonNull(order,     "order");
-        this.unique    = unique;
     }
 
     // ------------------------------------------------------------------
     //  Factory methods - one per primitive type
     // ------------------------------------------------------------------
 
-    /** {@link FieldType#STRING} index on {@code fieldPath}, ascending, non-unique. */
+    /** {@link FieldType#STRING} index on {@code fieldPath}, ascending. */
     public static IndexHint string(String fieldPath) {
-        return new IndexHint(fieldPath, FieldType.STRING, Order.ASCENDING, false);
+        return new IndexHint(fieldPath, FieldType.STRING, Order.ASCENDING);
     }
 
-    /** {@link FieldType#INT} index on {@code fieldPath}, ascending, non-unique. */
+    /** {@link FieldType#INT} index on {@code fieldPath}, ascending. */
     public static IndexHint integer(String fieldPath) {
-        return new IndexHint(fieldPath, FieldType.INT, Order.ASCENDING, false);
+        return new IndexHint(fieldPath, FieldType.INT, Order.ASCENDING);
     }
 
-    /** {@link FieldType#LONG} index on {@code fieldPath}, ascending, non-unique. */
+    /** {@link FieldType#LONG} index on {@code fieldPath}, ascending. */
     public static IndexHint bigInt(String fieldPath) {
-        return new IndexHint(fieldPath, FieldType.LONG, Order.ASCENDING, false);
+        return new IndexHint(fieldPath, FieldType.LONG, Order.ASCENDING);
     }
 
-    /** {@link FieldType#DOUBLE} index on {@code fieldPath}, ascending, non-unique. */
+    /** {@link FieldType#DOUBLE} index on {@code fieldPath}, ascending. */
     public static IndexHint decimal(String fieldPath) {
-        return new IndexHint(fieldPath, FieldType.DOUBLE, Order.ASCENDING, false);
+        return new IndexHint(fieldPath, FieldType.DOUBLE, Order.ASCENDING);
     }
 
-    /** {@link FieldType#BOOLEAN} index on {@code fieldPath}, ascending, non-unique. */
+    /** {@link FieldType#BOOLEAN} index on {@code fieldPath}, ascending. */
     public static IndexHint bool(String fieldPath) {
-        return new IndexHint(fieldPath, FieldType.BOOLEAN, Order.ASCENDING, false);
+        return new IndexHint(fieldPath, FieldType.BOOLEAN, Order.ASCENDING);
     }
 
     /**
-     * {@link FieldType#TIMESTAMP} index on {@code fieldPath}, ascending, non-unique.
+     * {@link FieldType#TIMESTAMP} index on {@code fieldPath}, ascending.
      *
      * <p>Accepts {@link java.time.Instant} and {@link java.time.LocalDateTime} in queries.
      * The entity field itself can be either a Java {@code long} (epoch millis), an
@@ -152,7 +150,7 @@ public final class IndexHint {
      * }</pre>
      */
     public static IndexHint timestamp(String fieldPath) {
-        return new IndexHint(fieldPath, FieldType.TIMESTAMP, Order.ASCENDING, false);
+        return new IndexHint(fieldPath, FieldType.TIMESTAMP, Order.ASCENDING);
     }
 
     // ------------------------------------------------------------------
@@ -164,11 +162,6 @@ public final class IndexHint {
         return string(fieldPath);
     }
 
-    /** STRING unique index on {@code fieldPath}. */
-    public static IndexHint unique(String fieldPath) {
-        return string(fieldPath).asUnique();
-    }
-
     /** STRING descending index on {@code fieldPath}. */
     public static IndexHint descending(String fieldPath) {
         return string(fieldPath).asDescending();
@@ -178,19 +171,14 @@ public final class IndexHint {
     //  Modifier methods (return new instance - IndexHint is immutable)
     // ------------------------------------------------------------------
 
-    /** Returns a copy marked as unique. The backend will reject duplicate values. */
-    public IndexHint asUnique() {
-        return new IndexHint(fieldPath, fieldType, order, true);
-    }
-
     /** Returns a copy with descending order. */
     public IndexHint asDescending() {
-        return new IndexHint(fieldPath, fieldType, Order.DESCENDING, unique);
+        return new IndexHint(fieldPath, fieldType, Order.DESCENDING);
     }
 
     /** Returns a copy with ascending order. */
     public IndexHint asAscending() {
-        return new IndexHint(fieldPath, fieldType, Order.ASCENDING, unique);
+        return new IndexHint(fieldPath, fieldType, Order.ASCENDING);
     }
 
     // ------------------------------------------------------------------
@@ -200,7 +188,6 @@ public final class IndexHint {
     public String    fieldPath() { return fieldPath; }
     public FieldType fieldType() { return fieldType; }
     public Order     order()     { return order; }
-    public boolean   unique()    { return unique; }
 
     /**
      * Returns a safe column / field name derived from the field path.
@@ -216,21 +203,39 @@ public final class IndexHint {
         if (this == o) return true;
         if (!(o instanceof IndexHint)) return false;
         IndexHint that = (IndexHint) o;
-        return unique == that.unique
-            && fieldPath.equals(that.fieldPath)
+        return fieldPath.equals(that.fieldPath)
             && fieldType == that.fieldType
             && order     == that.order;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(fieldPath, fieldType, order, unique);
+        return Objects.hash(fieldPath, fieldType, order);
+    }
+
+    // ------------------------------------------------------------------
+    //  Annotation-driven factory
+    // ------------------------------------------------------------------
+
+    /**
+     * Scans {@code clazz} and all its superclasses for {@link Indexed} annotations and
+     * returns the corresponding {@link IndexHint} list.
+     *
+     * <p>This is the public entry point for annotation-driven index discovery; the
+     * implementation delegates to the package-private {@link IndexHintScanner}.
+     * Called automatically by
+     * {@link br.com.finalcraft.evernifecore.storage.EntityDescriptor.Builder#build()}.
+     *
+     * @throws IllegalArgumentException if an annotated field's type cannot be mapped
+     *         to a supported {@link FieldType} and no explicit {@link Indexed#type()} was set
+     */
+    public static List<IndexHint> fromAnnotations(Class<?> clazz) {
+        return IndexHintScanner.scan(clazz);
     }
 
     @Override
     public String toString() {
         return "IndexHint{" + fieldType + " " + order
-            + (unique ? " UNIQUE" : "")
             + " on '" + fieldPath + "'}";
     }
 }

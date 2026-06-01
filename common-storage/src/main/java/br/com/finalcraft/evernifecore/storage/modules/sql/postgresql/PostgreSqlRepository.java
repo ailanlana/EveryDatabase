@@ -62,6 +62,14 @@ public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
         return "";
     }
 
+    /** PostgreSQL drops indexes by name without a table qualifier. */
+    @Override
+    protected void dropIndex(Connection conn, String indexName) throws SQLException {
+        try (java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("DROP INDEX IF EXISTS " + q(indexName));
+        }
+    }
+
     @Override
     protected String sqlTypeFor(IndexHint hint) {
         // PostgreSQL rejects bare DOUBLE; use the SQL-standard keyword.

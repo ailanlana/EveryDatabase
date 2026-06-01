@@ -83,20 +83,80 @@ final class MongoRepository<K, V> implements Repository<K, V> {
     }
 
     /**
-     * Creates the unique key index plus every {@link IndexHint} declared on the descriptor.
-     * Called once by {@code MongoStorage.repository()} when the repo is first obtained.
+     * Reconciles this collection's indexes with the descriptor's declared {@link IndexHint}s:
+     * creates the unique key index, creates a (non-unique) index for every declared hint,
+     * drops any {@code _idx_*} index that is no longer declared, and auto-populates the
+     * {@code _idx_*} field of freshly created indexes on the existing documents.
+     *
+     * <p>Called once by {@code MongoStorage.repository()} when the repo is first obtained.
      */
     void ensureIndexes() {
-        // Unique index on the storage key.
+        // Unique index on the storage key - this is entity identity, not an IndexHint.
         collection.createIndex(Indexes.ascending(COL_KEY), new IndexOptions().unique(true));
 
-        // One Mongo index per declared IndexHint.
+        // Snapshot the _idx_ indexes that already exist (field -> index name) before creating new ones.
+        Map<String, String> existing = existingIndexFields();
+
+        Set<String> declaredFields = new HashSet<>();
+        List<IndexHint> newHints = new ArrayList<>();
         for (IndexHint hint : hintsByPath.values()) {
-            String column = hint.indexColumnName();
+            String field = hint.indexColumnName();
+            declaredFields.add(field);
             Bson def = hint.order() == IndexHint.Order.DESCENDING
-                ? Indexes.descending(column)
-                : Indexes.ascending(column);
-            collection.createIndex(def, new IndexOptions().unique(hint.unique()));
+                ? Indexes.descending(field)
+                : Indexes.ascending(field);
+            collection.createIndex(def);
+            if (!existing.containsKey(field)) newHints.add(hint);
+        }
+
+        // Enforcement: drop _idx_ indexes that are no longer declared.
+        for (Map.Entry<String, String> entry : existing.entrySet()) {
+            if (!declaredFields.contains(entry.getKey())) {
+                collection.dropIndex(entry.getValue());
+            }
+        }
+
+        // Auto-populate the _idx_ field of freshly created indexes on the existing documents.
+        if (!newHints.isEmpty()) backfillIndexFields(newHints);
+    }
+
+    /** Maps each existing {@code _idx_*} index's backing field to its Mongo index name. */
+    private Map<String, String> existingIndexFields() {
+        Map<String, String> result = new HashMap<>();
+        for (Document index : collection.listIndexes()) {
+            String name = index.getString("name");
+            Document key = index.get("key", Document.class);
+            if (name == null || key == null) continue;
+            for (String field : key.keySet()) {
+                if (field.startsWith("_idx_")) result.put(field, name);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Auto-populates freshly created {@code _idx_*} fields for existing documents.
+     * Reads each document's stored entity, extracts the index value via the same
+     * {@link IndexValueExtractor} used at {@code save()} time, and {@code $set}s it.
+     * Documents whose data cannot be decoded are skipped.
+     */
+    private void backfillIndexFields(List<IndexHint> newHints) {
+        for (Document doc : collection.find()) {
+            Object key = doc.get(COL_KEY);
+            if (key == null) continue;
+            V entity;
+            try {
+                entity = decodeEntity(doc);
+            } catch (CodecException e) {
+                continue;
+            }
+            JsonNode tree = IndexValueExtractor.toTree(entity);
+            Document set = new Document();
+            for (IndexHint hint : newHints) {
+                Object value = IndexValueExtractor.extract(tree, hint);
+                set.append(hint.indexColumnName(), toMongoValue(value, hint));
+            }
+            collection.updateOne(Filters.eq(COL_KEY, key), new Document("$set", set));
         }
     }
 

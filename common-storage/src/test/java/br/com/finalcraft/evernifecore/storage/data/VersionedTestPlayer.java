@@ -1,5 +1,6 @@
 package br.com.finalcraft.evernifecore.storage.data;
 
+import br.com.finalcraft.evernifecore.storage.query.Indexed;
 import br.com.finalcraft.evernifecore.storage.versioned.Versioned;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
@@ -23,7 +24,11 @@ import java.util.UUID;
 public class VersionedTestPlayer implements Versioned {
 
     private UUID   uuid;
+
+    @Indexed
     private String name;
+
+    @Indexed
     private int    score;
 
     @ToString.Exclude

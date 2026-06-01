@@ -204,6 +204,19 @@ public final class EntityDescriptor<K, V> {
             return this;
         }
 
+        /**
+         * Builds the immutable {@link EntityDescriptor}.
+         *
+         * <p>As part of building, the entity type {@code V} is scanned for
+         * {@link br.com.finalcraft.evernifecore.storage.query.Indexed} annotations. Any annotated
+         * field produces an {@link IndexHint} that is merged with manually declared hints.
+         * If the same field path appears in both, an {@link IllegalStateException} is thrown
+         * (duplicate index). This allows mixing annotation-driven and manual declarations
+         * when needed, but prevents accidental double-indexing.
+         *
+         * @throws IllegalStateException    if required fields are missing or duplicate index paths exist
+         * @throws IllegalArgumentException if an {@code @Indexed} field has an unsupported Java type
+         */
         public EntityDescriptor<K, V> build() {
             if (collection == null || collection.isEmpty())
                 throw new IllegalStateException("EntityDescriptor.collection must be set");
@@ -218,6 +231,9 @@ public final class EntityDescriptor<K, V> {
             if (codec == null)
                 throw new IllegalStateException("EntityDescriptor.codec must be set");
 
+            // Scan entity class for @Indexed annotations and merge with manually declared hints.
+            indexes.addAll(IndexHint.fromAnnotations(type));
+
             // Reject duplicate index hints on the same field path - keeping two indexes
             // on the same field has no benefit and confuses some backends.
             Set<String> seenPaths = new HashSet<>();
@@ -225,8 +241,9 @@ public final class EntityDescriptor<K, V> {
                 if (!seenPaths.add(hint.fieldPath())) {
                     throw new IllegalStateException(
                         "EntityDescriptor: duplicate index hint on field '" + hint.fieldPath()
-                        + "'. Each field may only be indexed once."
-                    );
+                        + "'. Each field may only be indexed once. "
+                        + "(Check both manual .index() calls and @Indexed annotations on "
+                        + type.getSimpleName() + ".)");
                 }
             }
 
