@@ -1,0 +1,26 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        maven {
+            name = 'Fabric'
+            url = 'https://maven.fabricmc.net/'
+        }
+        maven {
+            name = 'Forge'
+            url = 'https://maven.minecraftforge.net/'
+        }
+    }
+}
+
+rootProject.name = 'EverNifeCore'
+
+include 'minecraft'
+include 'common'
+include 'api'
+include 'api-contracts'
+include 'libby'
+include 'hytale'
+include 'minecraft:modules:v1_7_10'
+include 'minecraft:modules:v1_12_2'
+include 'minecraft:modules:v1_16_5'
+include 'minecraft:modules:VersionedPlugins'
