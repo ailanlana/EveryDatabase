@@ -4,6 +4,33 @@ plugins {
 
 test {
     useJUnitPlatform()
+
+    // ---- Storage log level (controla o StorageLogConfig.defaults()) -----------------
+    // Em producao, nao setar essa property: o padrao e WARN (rotina silenciosa).
+    // Aqui nos testes, usamos INFO para ver eventos de lifecycle, index, migration, batch.
+    // Para ver progress ticks e queries individuais, troque por 'debug'.
+    systemProperty 'evernifecore.storage.log.level', 'info'
+
+    // ---- SLF4J simple configuration (onde os logs vao aparecer nos testes) ----------
+    // O namespace "evernifecore.storage" recebe INFO (casando com o nivel acima).
+    // O resto do classpath (HikariCP, MongoDB driver) fica em WARN.
+    systemProperty 'org.slf4j.simpleLogger.defaultLogLevel',               'warn'
+    systemProperty 'org.slf4j.simpleLogger.log.evernifecore.storage',       'info'
+    // write/delete sobem para DEBUG: e o nivel dos eventos de save/delete por entidade
+    // (ver AbstractStorageTest.setUp) - queremos esses visiveis durante os testes.
+    systemProperty 'org.slf4j.simpleLogger.log.evernifecore.storage.write',  'debug'
+    systemProperty 'org.slf4j.simpleLogger.log.evernifecore.storage.delete', 'debug'
+    systemProperty 'org.slf4j.simpleLogger.showDateTime',                   'true'
+    systemProperty 'org.slf4j.simpleLogger.dateTimeFormat',                 'HH:mm:ss.SSS'
+    systemProperty 'org.slf4j.simpleLogger.showThreadName',                 'false'
+    systemProperty 'org.slf4j.simpleLogger.logFile',                        'System.out'
+
+    // Exibir stdout/stderr dos testes no console do Gradle
+    testLogging {
+        showStandardStreams = true
+        events 'skipped', 'failed'
+        exceptionFormat = 'full'
+    }
 }
 
 java {
@@ -32,11 +59,16 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.4'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.15.4'
 
-    compileOnly 'org.slf4j:slf4j-api:1.7.36'
+    api 'org.slf4j:slf4j-api:1.7.36'
 
     // JUnit 5
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.0")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.0")
+
+    // SLF4J simple binding para testes.
+    // Sem ele, o HikariCP 5.x puxa slf4j-api 2.0.17 transitivamente mas sem nenhum provider,
+    // e o auto() sink do StorageLog cai em NOP - nenhum log aparece durante os testes.
+    testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.17'
 
     // JDBC drivers para testes de integracao
     testRuntimeOnly 'com.mysql:mysql-connector-j:9.4.0'

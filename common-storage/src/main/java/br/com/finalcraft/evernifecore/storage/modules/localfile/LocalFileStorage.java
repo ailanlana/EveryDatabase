@@ -1,10 +1,14 @@
 package br.com.finalcraft.evernifecore.storage.modules.localfile;
 
+import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.HealthStatus;
 import br.com.finalcraft.evernifecore.storage.Repository;
-import br.com.finalcraft.evernifecore.storage.Storage;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
+import br.com.finalcraft.evernifecore.storage.log.StorageOp;
 import br.com.finalcraft.evernifecore.storage.schema.Migration;
 import br.com.finalcraft.evernifecore.storage.schema.MigrationContext;
 import br.com.finalcraft.evernifecore.storage.schema.SchemaAwareStorage;
@@ -26,29 +30,20 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Directory structure on disk:
  * <pre>
  * &lt;baseDirectory&gt;/
- *   _schema_migrations.json      ← migration tracking (this class manages it)
+ *   _schema_migrations.json
  *   playerdata/
  *     550e8400-e29b-41d4-a716-446655440000.json
  *     ...
- *   economy/
- *     ...
  * </pre>
  *
- * <p>Each collection is a sub-directory; each entity is a JSON file whose name
- * is {@code key.toString()} (with path-separator characters sanitised to {@code _}).
+ * <p>Each collection is a sub-directory; each entity is a file whose name is
+ * {@code key.toString()} (with path-separator characters sanitised to {@code _}).
  *
- * <p>Does <em>not</em> implement
- * {@link br.com.finalcraft.evernifecore.storage.tx.TransactionalStorage} - local
- * files have no native transaction support.
- *
- * <p>Implements {@link SchemaAwareStorage}: applied migrations are recorded in
- * {@value #MIGRATIONS_FILE} inside the base directory.
- * Register migrations with {@link #register(List)} and call {@link #migrate()}
- * before performing CRUD operations.
+ * <p>Does <em>not</em> implement {@link br.com.finalcraft.evernifecore.storage.tx.TransactionalStorage}.
+ * Implements {@link SchemaAwareStorage}.
  */
 public final class LocalFileStorage implements Storage, SchemaAwareStorage {
 
-    /** File used to record applied migration versions. */
     static final String MIGRATIONS_FILE = "_schema_migrations.json";
 
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
@@ -60,8 +55,40 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
     /** Registered migrations, kept sorted by version. */
     private final List<Migration> registeredMigrations = new ArrayList<>();
 
+    // ------------------------------------------------------------------
+    //  Logging
+    // ------------------------------------------------------------------
+
+    private volatile StorageLogConfig logConfig;
+    private final StorageLog log;
+
+    // ------------------------------------------------------------------
+    //  Constructors
+    // ------------------------------------------------------------------
+
     public LocalFileStorage(LocalFileConfig config) {
-        this.config = config;
+        this(config, StorageLogConfig.defaults());
+    }
+
+    public LocalFileStorage(LocalFileConfig config, StorageLogConfig logConfig) {
+        this.config    = config;
+        this.logConfig = logConfig;
+        this.log       = new StorageLog("localfile", () -> this.logConfig);
+    }
+
+    // ------------------------------------------------------------------
+    //  Storage.getStorageLogConfig / setStorageLogConfig
+    // ------------------------------------------------------------------
+
+    @Override
+    public StorageLogConfig getStorageLogConfig() {
+        return logConfig;
+    }
+
+    @Override
+    public Storage setStorageLogConfig(StorageLogConfig config) {
+        this.logConfig = config;
+        return this;
     }
 
     // ------------------------------------------------------------------
@@ -82,11 +109,13 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
             try {
                 Files.createDirectories(config.baseDirectory());
                 initialized = true;
-                return null;
             } catch (IOException e) {
-                throw new RuntimeException("LocalFileStorage: failed to create base directory '"
-                    + config.baseDirectory() + "'", e);
+                throw log.errored(StorageOp.INIT, null,
+                    new RuntimeException("LocalFileStorage: failed to create base directory '"
+                        + config.baseDirectory() + "'", e));
             }
+            log.initialized("dir=" + config.baseDirectory());
+            return null;
         }, StorageExecutors.async());
     }
 
@@ -94,12 +123,20 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
     public CompletableFuture<Void> close() {
         repositories.clear();
         initialized = false;
+        log.closed();
         return CompletableFuture.completedFuture(null);
     }
 
     @Override
     public CompletableFuture<HealthStatus> health() {
         boolean ok = initialized && Files.isDirectory(config.baseDirectory());
+        if (!ok) {
+            log.emit(StorageOp.HEALTH, StorageLogLevel.WARN,
+                b -> b.detail("base directory not accessible: " + config.baseDirectory()));
+        } else {
+            log.emit(StorageOp.HEALTH, StorageLogLevel.DEBUG,
+                b -> b.detail("dir=" + config.baseDirectory()));
+        }
         return CompletableFuture.completedFuture(
             ok ? HealthStatus.ok(0)
                : HealthStatus.down("Base directory not accessible: " + config.baseDirectory())
@@ -117,13 +154,14 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
             descriptor.collection(),
             k -> {
                 LocalFileRepository<K, V> repo =
-                    new LocalFileRepository<>(descriptor, config.baseDirectory());
+                    new LocalFileRepository<>(descriptor, config.baseDirectory(), log);
                 try {
                     repo.initDirectory();
                 } catch (IOException e) {
-                    throw new RuntimeException(
-                        "LocalFileStorage: failed to create directory for collection '"
-                        + descriptor.collection() + "'", e);
+                    throw log.errored(StorageOp.TABLE_CREATE, descriptor.collection(),
+                        new RuntimeException(
+                            "LocalFileStorage: failed to create directory for collection '"
+                            + descriptor.collection() + "'", e));
                 }
                 return repo;
             }
@@ -146,7 +184,6 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
         return CompletableFuture.supplyAsync(() -> {
             List<AppliedEntry> entries = loadTrackingFile();
             if (entries.isEmpty()) return SchemaVersion.none();
-            // Entries are stored in insertion order (already version-sorted)
             AppliedEntry latest = entries.get(entries.size() - 1);
             return new SchemaVersion(latest.version, latest.applied_at);
         }, StorageExecutors.async());
@@ -164,35 +201,52 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
         }, StorageExecutors.async());
     }
 
-    /**
-     * Applies all pending migrations in version order.
-     *
-     * <p>Runs synchronously on the calling thread: each migration executes in order and the
-     * returned {@link CompletableFuture} is always already completed (normally or exceptionally)
-     * when returned.
-     */
     @Override
     public CompletableFuture<Void> migrate() {
         try {
             Set<String> applied = loadAppliedVersionSet();
             MigrationContext ctx = new LocalFileMigrationContext(this);
 
-            for (Migration migration : registeredMigrations) {
-                if (applied.contains(migration.version())) continue;
+            int pendingCount = 0;
+            for (Migration m : registeredMigrations) {
+                if (!applied.contains(m.version())) pendingCount++;
+            }
+            log.migrationPending(pendingCount);
 
+            int appliedCount = 0;
+            int skippedCount = 0;
+            String lastVersion = null;
+
+            for (Migration migration : registeredMigrations) {
+                if (applied.contains(migration.version())) {
+                    log.migrationSkipped(migration.version());
+                    skippedCount++;
+                    continue;
+                }
+
+                long startMs = System.currentTimeMillis();
                 try {
                     migration.execute(ctx);
                 } catch (Exception e) {
-                    throw new RuntimeException(
-                        "LocalFile migration " + migration.version()
-                        + " [" + migration.description() + "] failed", e
-                    );
+                    throw log.errored(StorageOp.MIGRATION_APPLY, null,
+                        new RuntimeException(
+                            "LocalFile migration " + migration.version()
+                            + " [" + migration.description() + "] failed", e));
                 }
 
-                // Record the successful application
                 recordApplied(migration);
                 applied.add(migration.version());
+                log.migrationApplied(migration.version(), migration.description(),
+                    System.currentTimeMillis() - startMs);
+                appliedCount++;
+                lastVersion = migration.version();
             }
+
+            String target = lastVersion != null ? lastVersion
+                : (registeredMigrations.isEmpty() ? "none"
+                   : registeredMigrations.get(registeredMigrations.size() - 1).version());
+            log.migrationComplete(appliedCount, skippedCount, target);
+
             return CompletableFuture.completedFuture(null);
         } catch (Exception e) {
             CompletableFuture<Void> f = new CompletableFuture<>();
@@ -218,7 +272,6 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
                 MAPPER.getTypeFactory().constructCollectionType(List.class, AppliedEntry.class);
             return MAPPER.readValue(bytes, listType);
         } catch (Exception e) {
-            // Corrupted tracking file → treat as empty; will re-apply if needed
             return new ArrayList<>();
         }
     }
@@ -243,7 +296,8 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
                 StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.WRITE);
         } catch (Exception e) {
-            throw new RuntimeException("LocalFile: failed to write migration tracking file", e);
+            throw log.errored(StorageOp.MIGRATION_COMPLETE, null,
+                new RuntimeException("LocalFile: failed to write migration tracking file", e));
         }
     }
 
@@ -251,13 +305,11 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
     //  Private: migration tracking POJO
     // ------------------------------------------------------------------
 
-    /** Jackson-serialisable entry in {@value #MIGRATIONS_FILE}. */
     static final class AppliedEntry {
         public String version;
         public String description;
         public long   applied_at;
 
-        /** Required by Jackson. */
         public AppliedEntry() {}
 
         AppliedEntry(String version, String description, long applied_at) {
@@ -268,7 +320,7 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
     }
 
     // ------------------------------------------------------------------
-    //  Private: MigrationContext implementation for LocalFile
+    //  Private: MigrationContext
     // ------------------------------------------------------------------
 
     private static final class LocalFileMigrationContext implements MigrationContext {
@@ -282,9 +334,9 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
         @Override
         @SuppressWarnings("unchecked")
         public <T> T getNativeClient(Class<T> type) {
-            if (type.isInstance(storage))                    return (T) storage;
-            if (type == Path.class)                          return (T) storage.baseDirectory();
-            if (type == LocalFileStorage.class)              return (T) storage;
+            if (type.isInstance(storage))       return (T) storage;
+            if (type == Path.class)             return (T) storage.baseDirectory();
+            if (type == LocalFileStorage.class) return (T) storage;
             throw new IllegalArgumentException(
                 "LocalFileStorage migration context does not provide: " + type.getName()
                 + " (available: LocalFileStorage, Path)"

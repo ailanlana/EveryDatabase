@@ -1,10 +1,14 @@
 package br.com.finalcraft.evernifecore.storage.modules.sql;
 
+import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.HealthStatus;
 import br.com.finalcraft.evernifecore.storage.Repository;
-import br.com.finalcraft.evernifecore.storage.Storage;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
+import br.com.finalcraft.evernifecore.storage.log.StorageOp;
 import br.com.finalcraft.evernifecore.storage.schema.Migration;
 import br.com.finalcraft.evernifecore.storage.schema.MigrationContext;
 import br.com.finalcraft.evernifecore.storage.schema.SchemaAwareStorage;
@@ -76,8 +80,55 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     /** Registered migrations, sorted by version. Mutated only before migrate() is called. */
     private final List<Migration> registeredMigrations = new ArrayList<>();
 
+    // ------------------------------------------------------------------
+    //  Logging
+    // ------------------------------------------------------------------
+
+    /** Live log config - volatile so that setStorageLogConfig() is picked up by all repos. */
+    private volatile StorageLogConfig logConfig;
+
+    /**
+     * Dispatcher shared by this storage and all its repositories.
+     * Reads logConfig live via the volatile field.
+     */
+    protected final StorageLog log;
+
+    // ------------------------------------------------------------------
+    //  Constructors
+    // ------------------------------------------------------------------
+
     public SqlStorage(SqlConfig config) {
-        this.config = config;
+        this(config, StorageLogConfig.defaults(), "sql");
+    }
+
+    public SqlStorage(SqlConfig config, StorageLogConfig logConfig) {
+        this(config, logConfig, "sql");
+    }
+
+    /**
+     * Base constructor used by subclasses to set the correct backend name.
+     *
+     * @param backendName short identifier used in log lines: "sql", "postgresql", "h2"
+     */
+    protected SqlStorage(SqlConfig config, StorageLogConfig logConfig, String backendName) {
+        this.config    = config;
+        this.logConfig = logConfig;
+        this.log       = new StorageLog(backendName, () -> this.logConfig);
+    }
+
+    // ------------------------------------------------------------------
+    //  Storage.getStorageLogConfig / setStorageLogConfig
+    // ------------------------------------------------------------------
+
+    @Override
+    public StorageLogConfig getStorageLogConfig() {
+        return logConfig;
+    }
+
+    @Override
+    public Storage setStorageLogConfig(StorageLogConfig config) {
+        this.logConfig = config;
+        return this;
     }
 
     // ------------------------------------------------------------------
@@ -98,14 +149,21 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
             hc.setMaxLifetime(config.pool().idleTimeout().toMillis() * 3L);
             hc.setPoolName("EverNifeCore-SQL");
 
-            dataSource = new HikariDataSource(hc);
-
-            try (Connection conn = dataSource.getConnection()) {
-                if (!conn.isValid(5)) throw new RuntimeException("SQL: initial connection validation failed");
+            try {
+                dataSource = new HikariDataSource(hc);
+                try (Connection conn = dataSource.getConnection()) {
+                    if (!conn.isValid(5)) {
+                        dataSource.close();
+                        throw log.errored(StorageOp.INIT, null,
+                            new RuntimeException("SQL: initial connection validation failed"));
+                    }
+                }
             } catch (SQLException e) {
-                dataSource.close();
-                throw new RuntimeException("SQL: failed to obtain initial connection", e);
+                if (dataSource != null) dataSource.close();
+                throw log.errored(StorageOp.INIT, null,
+                    new RuntimeException("SQL: failed to obtain initial connection", e));
             }
+            log.initialized("pool=" + hc.getPoolName() + " url=" + config.jdbcUrl());
             return null;
         }, StorageExecutors.async());
     }
@@ -114,6 +172,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     public CompletableFuture<Void> close() {
         return CompletableFuture.supplyAsync(() -> {
             if (dataSource != null && !dataSource.isClosed()) dataSource.close();
+            log.closed();
             return null;
         }, StorageExecutors.async());
     }
@@ -127,8 +186,18 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
             try (Connection conn = dataSource.getConnection()) {
                 boolean valid = conn.isValid(5);
                 long ping = System.currentTimeMillis() - start;
-                return valid ? HealthStatus.ok(ping) : HealthStatus.down("Connection.isValid() returned false");
+                if (valid) {
+                    log.emit(StorageOp.HEALTH, StorageLogLevel.DEBUG,
+                        b -> b.durationMs(ping).detail("connected=true"));
+                    return HealthStatus.ok(ping);
+                } else {
+                    log.emit(StorageOp.HEALTH, StorageLogLevel.WARN,
+                        b -> b.detail("Connection.isValid() returned false"));
+                    return HealthStatus.down("Connection.isValid() returned false");
+                }
             } catch (SQLException e) {
+                log.emit(StorageOp.HEALTH, StorageLogLevel.WARN,
+                    b -> b.detail("Connection error: " + e.getMessage()).error(e));
                 return HealthStatus.down("Connection error: " + e.getMessage());
             }
         }, StorageExecutors.async());
@@ -165,13 +234,21 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
     }
 
     /**
+     * Exposes the shared {@link StorageLog} dispatcher to subclasses so they can pass it to
+     * dialect-specific repositories in {@link #createRepository(EntityDescriptor)}.
+     */
+    protected StorageLog storageLog() {
+        return log;
+    }
+
+    /**
      * Factory method for creating a dialect-specific {@link SqlRepository}.
      *
      * <p>Override this in a subclass (e.g. {@code PostgreSqlStorage}) to return
      * a repository that uses the correct SQL dialect.
      */
     protected <K, V> SqlRepository<K, V> createRepository(EntityDescriptor<K, V> descriptor) {
-        return new SqlRepository<>(descriptor, dataSource, txConnection);
+        return new SqlRepository<>(descriptor, dataSource, txConnection, log);
     }
 
     @Override
@@ -190,9 +267,10 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                 try (Connection conn = dataSource.getConnection()) {
                     repo.createTableIfAbsent(conn);
                 } catch (SQLException e) {
-                    throw new RuntimeException(
-                        "SQL: failed to create table for collection '"
-                        + descriptor.collection() + "'", e);
+                    throw log.errored(StorageOp.TABLE_CREATE, descriptor.collection(),
+                        new RuntimeException(
+                            "SQL: failed to create table for collection '"
+                            + descriptor.collection() + "'", e));
                 }
                 return repo;
             }
@@ -211,21 +289,32 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                 conn = dataSource.getConnection();
                 conn.setAutoCommit(false);
             } catch (SQLException e) {
-                throw new RuntimeException("SQL: failed to open transaction connection", e);
+                throw log.errored(StorageOp.TX_BEGIN, null,
+                    new RuntimeException("SQL: failed to open transaction connection", e));
             }
 
             txConnection.set(conn);
             SqlTransactionScope scope = new SqlTransactionScope(this, conn);
+            long startMs = System.currentTimeMillis();
+            log.txBegin(null);
 
             try {
                 R result = work.apply(scope).join();
 
-                if (scope.isRolledBack()) conn.rollback();
-                else                      conn.commit();
+                if (scope.isRolledBack()) {
+                    conn.rollback();
+                    log.txRollback(null, System.currentTimeMillis() - startMs, null);
+                } else {
+                    conn.commit();
+                    log.txCommit(null, System.currentTimeMillis() - startMs);
+                }
 
                 return result;
             } catch (Exception e) {
-                try { conn.rollback(); } catch (SQLException ignored) {}
+                try {
+                    conn.rollback();
+                    log.txRollback(null, System.currentTimeMillis() - startMs, e);
+                } catch (SQLException ignored) {}
                 if (e instanceof RuntimeException) throw (RuntimeException) e;
                 throw new RuntimeException("SQL transaction failed", e);
             } finally {
@@ -260,7 +349,8 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                     return new SchemaVersion(rs.getString(1), rs.getLong(2));
                 }
             } catch (SQLException e) {
-                throw new RuntimeException("SQL: currentVersion() failed", e);
+                throw log.errored(StorageOp.MIGRATION_PENDING, null,
+                    new RuntimeException("SQL: currentVersion() failed", e));
             }
         }, StorageExecutors.async());
     }
@@ -277,7 +367,8 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                 }
                 return result;
             } catch (SQLException e) {
-                throw new RuntimeException("SQL: pending() failed", e);
+                throw log.errored(StorageOp.MIGRATION_PENDING, null,
+                    new RuntimeException("SQL: pending() failed", e));
             }
         }, StorageExecutors.async());
     }
@@ -290,22 +381,50 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                 Set<String> applied = readAppliedVersions(conn);
                 MigrationContext ctx = new SqlMigrationContext(conn);
 
+                // Count pending for the pending log
+                int pendingCount = 0;
                 for (Migration m : registeredMigrations) {
-                    if (applied.contains(m.version())) continue;
+                    if (!applied.contains(m.version())) pendingCount++;
+                }
+                log.migrationPending(pendingCount);
 
+                int appliedCount = 0;
+                int skippedCount = 0;
+                String lastVersion = null;
+
+                for (Migration m : registeredMigrations) {
+                    if (applied.contains(m.version())) {
+                        log.migrationSkipped(m.version());
+                        skippedCount++;
+                        continue;
+                    }
+
+                    long startMs = System.currentTimeMillis();
                     try {
                         m.execute(ctx);
                     } catch (Exception e) {
-                        throw new RuntimeException(
-                            "SQL migration " + m.version()
-                            + " [" + m.description() + "] failed", e);
+                        throw log.errored(StorageOp.MIGRATION_APPLY, null,
+                            new RuntimeException(
+                                "SQL migration " + m.version()
+                                + " [" + m.description() + "] failed", e));
                     }
 
                     recordApplied(conn, m);
+                    long elapsed = System.currentTimeMillis() - startMs;
+                    log.migrationApplied(m.version(), m.description(), elapsed);
+                    appliedCount++;
+                    lastVersion = m.version();
                 }
+
+                String target = lastVersion != null ? lastVersion
+                    : (registeredMigrations.isEmpty() ? "none"
+                       : registeredMigrations.get(registeredMigrations.size() - 1).version());
+                log.migrationComplete(appliedCount, skippedCount, target);
+
                 return null;
             } catch (SQLException e) {
-                throw new RuntimeException("SQL: migrate() failed", e);
+                throw log.errored(StorageOp.MIGRATION_COMPLETE, null,
+                    new RuntimeException("SQL: migrate() failed", e));
             }
         }, StorageExecutors.async());
     }

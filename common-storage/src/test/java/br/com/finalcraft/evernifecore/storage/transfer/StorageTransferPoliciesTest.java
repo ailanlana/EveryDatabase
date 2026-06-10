@@ -3,6 +3,7 @@ package br.com.finalcraft.evernifecore.storage.transfer;
 import br.com.finalcraft.evernifecore.storage.*;
 import br.com.finalcraft.evernifecore.storage.codec.JacksonJsonCodec;
 import br.com.finalcraft.evernifecore.storage.data.TestPlayer;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
 import br.com.finalcraft.evernifecore.storage.modules.AbstractStorageTest;
 import br.com.finalcraft.evernifecore.storage.modules.memory.InMemoryStorage;
 import br.com.finalcraft.evernifecore.storage.modules.sql.PoolTuning;
@@ -787,6 +788,17 @@ class StorageTransferPoliciesTest {
                         return base.query(query);
                     }
                 };
+            }
+
+            @Override
+            public StorageLogConfig getStorageLogConfig() {
+                return delegate.getStorageLogConfig();
+            }
+
+            @Override
+            public Storage setStorageLogConfig(StorageLogConfig config) {
+                delegate.setStorageLogConfig(config);
+                return this;
             }
         };
     }

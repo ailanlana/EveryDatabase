@@ -6,6 +6,8 @@ import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.codec.JacksonJsonCodec;
 import br.com.finalcraft.evernifecore.storage.data.TestPlayer;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogTopic;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 import br.com.finalcraft.evernifecore.storage.query.Query;
 import lombok.extern.java.Log;
@@ -81,6 +83,12 @@ public abstract class AbstractStorageTest {
     void setUp(TestInfo testInfo) {
         String methodName = testInfo.getTestMethod().map(Method::getName).orElse("unknown");
         storage = createStorage(methodName);
+        // Hide noisy lifecycle chatter (INIT/CLOSE fire on every test) and surface
+        // the per-entity write/delete events at DEBUG so they're visible in the run.
+        storage.getStorageLogConfig()
+//            .defaultLevel(StorageLogLevel.DEBUG)
+//            .level(StorageLogTopic.DELETE, StorageLogLevel.DEBUG)
+            .includeValues(true);
         storage.init().join();
         repo = storage.repository(DESCRIPTOR);
     }

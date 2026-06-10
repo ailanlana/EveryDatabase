@@ -1,6 +1,8 @@
 package br.com.finalcraft.evernifecore.storage.modules.sql.h2;
 
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlConfig;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlRepository;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlStorage;
@@ -30,7 +32,11 @@ import java.util.List;
 public class H2SqlStorage extends SqlStorage {
 
     public H2SqlStorage(SqlConfig config) {
-        super(config);
+        this(config, StorageLogConfig.defaults());
+    }
+
+    public H2SqlStorage(SqlConfig config, StorageLogConfig logConfig) {
+        super(config, logConfig, "h2");
     }
 
     /**
@@ -45,7 +51,7 @@ public class H2SqlStorage extends SqlStorage {
 
     @Override
     protected <K, V> SqlRepository<K, V> createRepository(EntityDescriptor<K, V> descriptor) {
-        return new H2SqlRepository<>(descriptor, getDataSource(), txConnection);
+        return new H2SqlRepository<>(descriptor, getDataSource(), txConnection, storageLog());
     }
 
     // ------------------------------------------------------------------
@@ -56,8 +62,9 @@ public class H2SqlStorage extends SqlStorage {
 
         H2SqlRepository(EntityDescriptor<K, V> descriptor,
                         DataSource dataSource,
-                        ThreadLocal<Connection> txConnection) {
-            super(descriptor, dataSource, txConnection);
+                        ThreadLocal<Connection> txConnection,
+                        StorageLog log) {
+            super(descriptor, dataSource, txConnection, log);
         }
 
         @Override

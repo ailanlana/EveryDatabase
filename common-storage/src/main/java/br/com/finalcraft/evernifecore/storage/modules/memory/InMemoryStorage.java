@@ -1,9 +1,11 @@
 package br.com.finalcraft.evernifecore.storage.modules.memory;
 
+import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.HealthStatus;
 import br.com.finalcraft.evernifecore.storage.Repository;
-import br.com.finalcraft.evernifecore.storage.Storage;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
 import br.com.finalcraft.evernifecore.storage.tx.TransactionScope;
 import br.com.finalcraft.evernifecore.storage.tx.TransactionalStorage;
 
@@ -25,9 +27,49 @@ public final class InMemoryStorage implements Storage, TransactionalStorage {
     private final ConcurrentHashMap<String, InMemoryRepository<?, ?>> repositories = new ConcurrentHashMap<>();
     private volatile boolean initialized = false;
 
+    // ------------------------------------------------------------------
+    //  Logging
+    // ------------------------------------------------------------------
+
+    private volatile StorageLogConfig logConfig;
+    private final StorageLog log;
+
+    // ------------------------------------------------------------------
+    //  Constructors
+    // ------------------------------------------------------------------
+
+    public InMemoryStorage() {
+        this(StorageLogConfig.defaults());
+    }
+
+    public InMemoryStorage(StorageLogConfig logConfig) {
+        this.logConfig = logConfig;
+        this.log       = new StorageLog("memory", () -> this.logConfig);
+    }
+
+    // ------------------------------------------------------------------
+    //  Storage.getStorageLogConfig / setStorageLogConfig
+    // ------------------------------------------------------------------
+
+    @Override
+    public StorageLogConfig getStorageLogConfig() {
+        return logConfig;
+    }
+
+    @Override
+    public Storage setStorageLogConfig(StorageLogConfig config) {
+        this.logConfig = config;
+        return this;
+    }
+
+    // ------------------------------------------------------------------
+    //  Lifecycle
+    // ------------------------------------------------------------------
+
     @Override
     public CompletableFuture<Void> init() {
         initialized = true;
+        log.initialized("ephemeral in-memory store");
         return CompletableFuture.completedFuture(null);
     }
 
@@ -35,6 +77,7 @@ public final class InMemoryStorage implements Storage, TransactionalStorage {
     public CompletableFuture<Void> close() {
         repositories.clear();
         initialized = false;
+        log.closed();
         return CompletableFuture.completedFuture(null);
     }
 
@@ -56,7 +99,7 @@ public final class InMemoryStorage implements Storage, TransactionalStorage {
         }
         return (Repository<K, V>) repositories.computeIfAbsent(
             descriptor.collection(),
-            k -> new InMemoryRepository<>(descriptor)
+            k -> new InMemoryRepository<>(descriptor, log)
         );
     }
 

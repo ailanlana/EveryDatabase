@@ -5,6 +5,9 @@ import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.codec.CodecException;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
+import br.com.finalcraft.evernifecore.storage.log.StorageOp;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 import br.com.finalcraft.evernifecore.storage.query.IndexValueExtractor;
 import br.com.finalcraft.evernifecore.storage.query.Query;
@@ -66,6 +69,8 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     protected final DataSource dataSource;
     /** Non-null on the transaction thread when inside an {@link SqlStorage#inTransaction} scope. */
     protected final ThreadLocal<Connection> txConnection;
+    /** Shared log dispatcher - reads StorageLogConfig live from the parent Storage. */
+    protected final StorageLog log;
 
     /** Declared index hints in iteration order (preserves descriptor declaration order). */
     protected final List<IndexHint> indexes;
@@ -73,10 +78,11 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     protected final Map<String, IndexHint> hintsByPath;
 
     protected SqlRepository(EntityDescriptor<K, V> descriptor, DataSource dataSource,
-                             ThreadLocal<Connection> txConnection) {
+                             ThreadLocal<Connection> txConnection, StorageLog log) {
         this.descriptor   = descriptor;
         this.dataSource   = dataSource;
         this.txConnection = txConnection;
+        this.log          = log;
         this.indexes      = new ArrayList<>(descriptor.indexes());
         this.hintsByPath  = new HashMap<>();
         for (IndexHint hint : this.indexes) this.hintsByPath.put(hint.fieldPath(), hint);
@@ -188,18 +194,26 @@ public class SqlRepository<K, V> implements Repository<K, V> {
      * </ol>
      */
     protected void createTableIfAbsent(Connection conn) throws SQLException {
+        long reconcileStart = System.currentTimeMillis();
+
         // --- Step 1: create base table (no-op if already exists) ---
+        boolean logReconcile = log.isEnabled(StorageOp.INDEX_RECONCILE, StorageLogLevel.INFO)
+            || log.isEnabled(StorageOp.INDEX_RECONCILE, StorageLogLevel.DEBUG);
+
         StringBuilder sql = new StringBuilder("CREATE TABLE IF NOT EXISTS ");
         sql.append(q(tableName())).append(" (");
         sql.append(q(COL_KEY)).append(" VARCHAR(255) NOT NULL, ");
         sql.append(q(COL_DATA)).append(' ').append(dataColumnType()).append(" NOT NULL, ");
-        // Extra column for versioned descriptors only - non-versioned tables keep the 2-column schema.
+
         if (descriptor.isVersioned()) {
+            // Extra column for versioned descriptors only
             sql.append(q(COL_VERSION)).append(" BIGINT NOT NULL DEFAULT 0, ");
         }
+
         for (IndexHint hint : indexes) {
             sql.append(q(hint.indexColumnName())).append(' ').append(sqlTypeFor(hint)).append(", ");
         }
+
         sql.append("PRIMARY KEY (").append(q(COL_KEY)).append("))");
 
         try (Statement stmt = conn.createStatement()) {
@@ -207,21 +221,44 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         }
 
         // --- Step 2: add any missing _idx_* columns, remembering which were actually added ---
-        List<IndexHint> addedColumns = new ArrayList<>();
+        List<IndexHint> addedHints = new ArrayList<>();
         for (IndexHint hint : indexes) {
-            if (ensureIndexColumn(conn, hint)) addedColumns.add(hint);
+            if (ensureIndexColumn(conn, hint)) {
+                addedHints.add(hint);
+                log.columnAdded(tableName(), hint);
+            }
         }
 
         // --- Step 3: create B-tree indexes (separate DDL - inline INDEX is MySQL-specific) ---
         for (IndexHint hint : indexes) {
+            // createIndexIfAbsent uses IF NOT EXISTS - we infer "new" from addedHints
             createIndexIfAbsent(conn, hint);
         }
 
+        // Log newly created indexes (those whose column was just added)
+        for (IndexHint hint : addedHints) {
+            log.indexCreated(tableName(), hint);
+        }
+
         // --- Step 4: enforcement - drop _idx_* indexes/columns no longer declared ---
-        dropUndeclaredIndexes(conn);
+        List<String> droppedColumns = dropUndeclaredIndexes(conn);
+        for (String col : droppedColumns) {
+            log.indexDropped(tableName(), col);
+        }
 
         // --- Step 5: auto-populate freshly added columns from the existing rows ---
-        if (!addedColumns.isEmpty()) backfillIndexColumns(conn, addedColumns);
+        long backfilledRows = 0L;
+        if (!addedHints.isEmpty()) {
+            backfilledRows = backfillIndexColumns(conn, addedHints);
+        }
+
+        // --- Reconcile summary ---
+        if (logReconcile) {
+            List<String> createdFields = new ArrayList<>(addedHints.size());
+            for (IndexHint h : addedHints) createdFields.add(h.fieldPath());
+            long elapsed = System.currentTimeMillis() - reconcileStart;
+            log.reconcileSummary(tableName(), createdFields, droppedColumns, backfilledRows, elapsed);
+        }
     }
 
     /**
@@ -253,6 +290,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     private boolean indexColumnExists(Connection conn, IndexHint hint) throws SQLException {
         DatabaseMetaData meta = conn.getMetaData();
         String colName = hint.indexColumnName();
+
         // Try original name first, then upper-case (H2 default-mode stores identifiers in UPPER).
         for (String tbl : new String[]{tableName(), tableName().toUpperCase(Locale.ROOT)}) {
             try (ResultSet rs = meta.getColumns(null, null, tbl, null)) {
@@ -290,10 +328,14 @@ public class SqlRepository<K, V> implements Repository<K, V> {
      *
      * <p>Indexes are dropped first (via {@link #dropIndex}) so the subsequent {@code DROP COLUMN}
      * cannot fail on databases that refuse to drop a still-indexed column.
+     *
+     * @return list of column names that were dropped (for logging)
      */
-    protected void dropUndeclaredIndexes(Connection conn) throws SQLException {
+    protected List<String> dropUndeclaredIndexes(Connection conn) throws SQLException {
         Set<String> declared = new HashSet<>();
         for (IndexHint hint : indexes) declared.add(hint.indexColumnName().toLowerCase(Locale.ROOT));
+
+        List<String> droppedColumns = new ArrayList<>();
 
         // Drop indexes backed by an _idx_ column that is no longer declared.
         for (Map.Entry<String, String> entry : existingIndexColumns(conn).entrySet()) {
@@ -307,8 +349,10 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 try (Statement stmt = conn.createStatement()) {
                     stmt.execute("ALTER TABLE " + q(tableName()) + " DROP COLUMN " + q(column));
                 }
+                droppedColumns.add(column);
             }
         }
+        return droppedColumns;
     }
 
     /**
@@ -325,7 +369,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
      * Returns {@code indexName -> backing column} for every index whose column is an
      * {@code _idx_*} sibling column. The primary-key index (on {@link #COL_KEY}) is skipped.
      */
-    private Map<String, String> existingIndexColumns(Connection conn) throws SQLException {
+    protected Map<String, String> existingIndexColumns(Connection conn) throws SQLException {
         Map<String, String> result = new LinkedHashMap<>();
         DatabaseMetaData meta = conn.getMetaData();
         for (String tbl : new String[]{tableName(), tableName().toUpperCase(Locale.ROOT)}) {
@@ -339,13 +383,13 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                     }
                 }
             }
-            if (!result.isEmpty()) break; // first table-name variant that resolves wins
+            if (!result.isEmpty()) break;
         }
         return result;
     }
 
     /** Returns the names of all {@code _idx_*} columns currently present on the table. */
-    private List<String> existingIndexColumnNames(Connection conn) throws SQLException {
+    protected List<String> existingIndexColumnNames(Connection conn) throws SQLException {
         List<String> result = new ArrayList<>();
         DatabaseMetaData meta = conn.getMetaData();
         for (String tbl : new String[]{tableName(), tableName().toUpperCase(Locale.ROOT)}) {
@@ -369,10 +413,23 @@ public class SqlRepository<K, V> implements Repository<K, V> {
      * <p>Reads each row's stored JSON, extracts the index value via the same
      * {@link IndexValueExtractor} used at {@code save()} time, and writes it into the new
      * column(s). Only the columns in {@code newHints} are touched; existing index columns are
-     * left as-is. Rows whose JSON cannot be decoded are skipped (consistent with
-     * {@link #readEntities}).
+     * left as-is. Rows whose JSON cannot be decoded are skipped with a WARN log entry
+     * (consistent with {@link #readEntities}).
+     *
+     * @return number of rows actually updated (for progress / reconcile summary)
      */
-    protected void backfillIndexColumns(Connection conn, List<IndexHint> newHints) throws SQLException {
+    protected long backfillIndexColumns(Connection conn, List<IndexHint> newHints) throws SQLException {
+        // Count total rows for progress tracking (only when progress logging is useful)
+        long totalRows = 0L;
+        StorageLog.ProgressTracker tracker = null;
+        if (log.isEnabled(StorageOp.INDEX_BACKFILL, StorageLogLevel.DEBUG)) {
+            String countSql = "SELECT COUNT(*) FROM " + q(tableName());
+            try (Statement cs = conn.createStatement(); ResultSet cr = cs.executeQuery(countSql)) {
+                if (cr.next()) totalRows = cr.getLong(1);
+            }
+            tracker = log.newProgressTracker(StorageOp.INDEX_BACKFILL, tableName());
+        }
+
         StringBuilder update = new StringBuilder("UPDATE ").append(q(tableName())).append(" SET ");
         for (int i = 0; i < newHints.size(); i++) {
             if (i > 0) update.append(", ");
@@ -382,10 +439,10 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
         String select = "SELECT " + q(COL_KEY) + ", " + q(COL_DATA) + " FROM " + q(tableName());
 
+        long batched = 0L;
         try (Statement selectStmt = conn.createStatement();
              ResultSet rs = selectStmt.executeQuery(select);
              PreparedStatement ps = conn.prepareStatement(update.toString())) {
-            int batched = 0;
             while (rs.next()) {
                 String key  = rs.getString(1);
                 String json = rs.getString(2);
@@ -393,6 +450,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 try {
                     entity = descriptor.codec().decode(json.getBytes(StandardCharsets.UTF_8));
                 } catch (CodecException e) {
+                    log.skippedCorruptedRow(tableName(), key, e);
                     continue; // skip undecodable rows
                 }
                 JsonNode tree = IndexValueExtractor.toTree(entity);
@@ -403,9 +461,14 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 ps.setString(slot, key);
                 ps.addBatch();
                 batched++;
+
+                if (tracker != null) tracker.tick(batched, totalRows);
             }
             if (batched > 0) ps.executeBatch();
         }
+
+        if (tracker != null) tracker.finish(batched);
+        return batched;
     }
 
     protected String tableName() {
@@ -547,6 +610,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 bindUpsertParameters(ps, key, entity, data);
                 ps.executeUpdate();
             }
+            log.saved(tableName(), key, entity);
             return null;
         });
     }
@@ -589,17 +653,20 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                         // Another writer updated between our SELECT and UPDATE; undo setter.
                         descriptor.versionSetter().accept(entity, incomingVersion);
                         if (autoCommit) conn.rollback();
+                        log.optimisticLockConflict(tableName(), key, incomingVersion, dbVersion);
                         throw new OptimisticLockException(
                             descriptor.type(), key, incomingVersion, dbVersion);
                     }
                 } else {
                     // In-memory version differs from DB version before we even try to write.
                     if (autoCommit) conn.rollback();
+                    log.optimisticLockConflict(tableName(), key, incomingVersion, dbVersion);
                     throw new OptimisticLockException(
                         descriptor.type(), key, incomingVersion, dbVersion);
                 }
 
                 if (autoCommit) conn.commit();
+                log.saved(tableName(), key, entity);
                 return null;
             } catch (OptimisticLockException ole) {
                 if (autoCommit) { try { conn.rollback(); } catch (SQLException ignored) {} }
@@ -694,6 +761,8 @@ public class SqlRepository<K, V> implements Repository<K, V> {
 
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
+        if (entities.isEmpty()) return CompletableFuture.completedFuture(null);
+
         if (descriptor.isVersioned() && supportsVersioning()) {
             // For versioned descriptors: loop save() per entity within a single connection
             // to ensure each entity's optimistic lock check is atomic.
@@ -714,6 +783,9 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 }
             });
         }
+
+        long startMs = System.currentTimeMillis();
+        long count = entities.size();
         return withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(buildUpsertSql())) {
                 for (V entity : entities) {
@@ -724,6 +796,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 }
                 ps.executeBatch();
             }
+            log.savedBatch(tableName(), count, System.currentTimeMillis() - startMs);
             return null;
         });
     }
@@ -752,10 +825,12 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             int rows = updateVersioned(conn, key, dataStr, entity, incomingVersion);
             if (rows == 0) {
                 descriptor.versionSetter().accept(entity, incomingVersion); // undo
+                log.optimisticLockConflict(tableName(), key, incomingVersion, dbVersion);
                 throw new OptimisticLockException(
                     descriptor.type(), key, incomingVersion, dbVersion);
             }
         } else {
+            log.optimisticLockConflict(tableName(), key, incomingVersion, dbVersion);
             throw new OptimisticLockException(
                 descriptor.type(), key, incomingVersion, dbVersion);
         }
@@ -781,7 +856,9 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         return withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, key.toString());
-                return ps.executeUpdate() > 0;
+                boolean existed = ps.executeUpdate() > 0;
+                log.deleted(tableName(), key, existed);
+                return existed;
             }
         });
     }
@@ -847,11 +924,14 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         }
 
         String sql = "SELECT " + q(COL_DATA) + " FROM " + q(tableName()) + " WHERE " + where;
+        long startMs = System.currentTimeMillis();
 
         return withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
-                return readEntities(ps);
+                List<V> result = readEntities(ps);
+                log.queried(tableName(), query, result.size(), System.currentTimeMillis() - startMs);
+                return result;
             }
         });
     }
@@ -893,13 +973,25 @@ public class SqlRepository<K, V> implements Repository<K, V> {
     //  Utility
     // ------------------------------------------------------------------
 
+    /**
+     * Reads all entities from the given prepared statement's result set.
+     * Rows whose JSON cannot be decoded emit a WARN log entry and are silently skipped
+     * (consistent with the codec-tolerant "skip corrupted" contract).
+     */
     private List<V> readEntities(PreparedStatement ps) throws SQLException {
         List<V> result = new ArrayList<>();
         try (ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
-                byte[] data = rs.getString(1).getBytes(StandardCharsets.UTF_8);
-                try { result.add(descriptor.codec().decode(data)); }
-                catch (CodecException ignored) {}
+                String json = rs.getString(1);
+                String key  = null;
+                // Try to read the key column if available (best-effort for logging context)
+                try { key = rs.getString(COL_KEY); } catch (SQLException ignored) {}
+                byte[] data = json.getBytes(StandardCharsets.UTF_8);
+                try {
+                    result.add(descriptor.codec().decode(data));
+                } catch (CodecException e) {
+                    log.skippedCorruptedRow(tableName(), key, e);
+                }
             }
         }
         return result;

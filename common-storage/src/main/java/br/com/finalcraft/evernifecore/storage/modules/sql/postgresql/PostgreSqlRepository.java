@@ -1,6 +1,7 @@
 package br.com.finalcraft.evernifecore.storage.modules.sql.postgresql;
 
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlRepository;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 
@@ -32,8 +33,8 @@ import java.util.List;
 public class PostgreSqlRepository<K, V> extends SqlRepository<K, V> {
 
     public PostgreSqlRepository(EntityDescriptor<K, V> descriptor, DataSource dataSource,
-                                ThreadLocal<Connection> txConnection) {
-        super(descriptor, dataSource, txConnection);
+                                ThreadLocal<Connection> txConnection, StorageLog log) {
+        super(descriptor, dataSource, txConnection, log);
     }
 
     @Override

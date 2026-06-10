@@ -2,6 +2,7 @@ package br.com.finalcraft.evernifecore.storage.modules.memory;
 
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 import br.com.finalcraft.evernifecore.storage.query.IndexValueExtractor;
 import br.com.finalcraft.evernifecore.storage.query.Query;
@@ -31,6 +32,7 @@ import java.util.stream.Stream;
 final class InMemoryRepository<K, V> implements Repository<K, V> {
 
     private final EntityDescriptor<K, V> descriptor;
+    private final StorageLog log;
     private final ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
 
     /** Indexed field paths (declared in the descriptor). */
@@ -42,8 +44,9 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
      */
     private final Map<String, Map<Object, Set<K>>> indexes;
 
-    InMemoryRepository(EntityDescriptor<K, V> descriptor) {
+    InMemoryRepository(EntityDescriptor<K, V> descriptor, StorageLog log) {
         this.descriptor = descriptor;
+        this.log        = log;
 
         this.hintsByPath = new HashMap<>();
         this.indexes     = new ConcurrentHashMap<>();
@@ -83,11 +86,14 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
             if (existing != null) removeFromIndexes(key, existing);
             addToIndexes(key, copy);
         }
+        log.saved(descriptor.collection(), key, entity);
         return CompletableFuture.completedFuture(null);
     }
 
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
+        long startMs = System.currentTimeMillis();
+        long count = entities.size();
         synchronized (this) {
             for (V entity : entities) {
                 K key = descriptor.keyExtractor().apply(entity);
@@ -98,6 +104,7 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
                 addToIndexes(key, copy);
             }
         }
+        log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs);
         return CompletableFuture.completedFuture(null);
     }
 
@@ -110,7 +117,9 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
         synchronized (this) {
             V previous = store.remove(key);
             if (previous != null) removeFromIndexes(key, previous);
-            return CompletableFuture.completedFuture(previous != null);
+            boolean existed = previous != null;
+            log.deleted(descriptor.collection(), key, existed);
+            return CompletableFuture.completedFuture(existed);
         }
     }
 
@@ -143,6 +152,8 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
     @Override
     public CompletableFuture<List<V>> query(Query query) {
         // Intersect candidate-key sets across all conditions.
+        long startMs = System.currentTimeMillis();
+
         Set<K> candidates = null;
         for (Query.Condition condition : query.conditions()) {
             IndexHint hint = hintsByPath.get(condition.fieldPath());
@@ -164,6 +175,8 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
                 if (v != null) result.add(deepCopy(v));
             }
         }
+
+        log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
         return CompletableFuture.completedFuture(result);
     }
 

@@ -4,6 +4,9 @@ import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.codec.CodecException;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
+import br.com.finalcraft.evernifecore.storage.log.StorageOp;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 import br.com.finalcraft.evernifecore.storage.query.IndexValueExtractor;
 import br.com.finalcraft.evernifecore.storage.query.Query;
@@ -40,13 +43,15 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
 
     private final EntityDescriptor<K, V> descriptor;
     private final Path collectionDir;
+    private final StorageLog log;
     private final ConcurrentHashMap<String, ReadWriteLock> locks = new ConcurrentHashMap<>();
     /** Declared index hints indexed by field path - used for query dispatch. */
     private final Map<String, IndexHint> hintsByPath;
 
-    LocalFileRepository(EntityDescriptor<K, V> descriptor, Path baseDirectory) {
+    LocalFileRepository(EntityDescriptor<K, V> descriptor, Path baseDirectory, StorageLog log) {
         this.descriptor    = descriptor;
         this.collectionDir = baseDirectory.resolve(descriptor.collection());
+        this.log           = log;
         this.hintsByPath   = new HashMap<>();
         for (IndexHint hint : descriptor.indexes()) this.hintsByPath.put(hint.fieldPath(), hint);
     }
@@ -54,6 +59,8 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     /** Called once by the owning {@link LocalFileStorage} at repository creation time. */
     void initDirectory() throws IOException {
         Files.createDirectories(collectionDir);
+        log.emit(StorageOp.TABLE_CREATE, StorageLogLevel.INFO,
+            b -> b.collection(descriptor.collection()).detail("dir=" + collectionDir));
     }
 
     // ------------------------------------------------------------------
@@ -92,9 +99,11 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                 byte[] data = Files.readAllBytes(path);
                 return Optional.of(descriptor.codec().decode(data));
             } catch (IOException e) {
-                throw new RuntimeException("LocalFile: failed to read key=" + key, e);
+                throw log.errored(StorageOp.FIND, descriptor.collection(),
+                    new RuntimeException("LocalFile: failed to read key=" + key, e));
             } catch (CodecException e) {
-                throw new RuntimeException("LocalFile: codec error reading key=" + key, e);
+                throw log.errored(StorageOp.FIND, descriptor.collection(),
+                    new RuntimeException("LocalFile: codec error reading key=" + key, e));
             } finally {
                 lock.readLock().unlock();
             }
@@ -120,30 +129,48 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
     public CompletableFuture<Void> save(V entity) {
         K key = descriptor.keyExtractor().apply(entity);
         return CompletableFuture.supplyAsync(() -> {
-            ReadWriteLock lock = lockFor(key);
-            lock.writeLock().lock();
-            try {
-                byte[] data = descriptor.codec().encode(entity);
-                Files.write(keyToPath(key), data,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE);
-                return null;
-            } catch (IOException e) {
-                throw new RuntimeException("LocalFile: failed to write key=" + key, e);
-            } catch (CodecException e) {
-                throw new RuntimeException("LocalFile: codec error writing key=" + key, e);
-            } finally {
-                lock.writeLock().unlock();
-            }
+            writeFile(key, entity);
+            log.saved(descriptor.collection(), key, entity);
+            return null;
         }, StorageExecutors.async());
     }
 
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
-        List<CompletableFuture<Void>> futures = new ArrayList<>(entities.size());
-        for (V entity : entities) futures.add(save(entity));
-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+        long startMs = System.currentTimeMillis();
+        long count = entities.size();
+        List<CompletableFuture<Void>> futures = new ArrayList<>((int) count);
+        for (V entity : entities) {
+            K key = descriptor.keyExtractor().apply(entity);
+            futures.add(CompletableFuture.runAsync(() -> writeFile(key, entity), StorageExecutors.async()));
+        }
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+            .thenRun(() -> log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs));
+    }
+
+    /**
+     * Encodes and writes one entity to disk under its per-key lock. Shared by {@link #save}
+     * (which logs a single {@code SAVE} event) and {@link #saveAll} (which logs one
+     * {@code SAVE_BATCH} summary instead - logging here too would emit one event per entity).
+     */
+    private void writeFile(K key, V entity) {
+        ReadWriteLock lock = lockFor(key);
+        lock.writeLock().lock();
+        try {
+            byte[] data = descriptor.codec().encode(entity);
+            Files.write(keyToPath(key), data,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE);
+        } catch (IOException e) {
+            throw log.errored(StorageOp.SAVE, descriptor.collection(),
+                new RuntimeException("LocalFile: failed to write key=" + key, e));
+        } catch (CodecException e) {
+            throw log.errored(StorageOp.SAVE, descriptor.collection(),
+                new RuntimeException("LocalFile: codec error writing key=" + key, e));
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     @Override
@@ -153,12 +180,17 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             lock.writeLock().lock();
             try {
                 Path path = keyToPath(key);
-                if (!Files.exists(path)) return false;
+                if (!Files.exists(path)) {
+                    log.deleted(descriptor.collection(), key, false);
+                    return false;
+                }
                 Files.delete(path);
                 locks.remove(keyToString(key));
+                log.deleted(descriptor.collection(), key, true);
                 return true;
             } catch (IOException e) {
-                throw new RuntimeException("LocalFile: failed to delete key=" + key, e);
+                throw log.errored(StorageOp.DELETE, descriptor.collection(),
+                    new RuntimeException("LocalFile: failed to delete key=" + key, e));
             } finally {
                 lock.writeLock().unlock();
             }
@@ -185,7 +217,8 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                         .count();
                 }
             } catch (IOException e) {
-                throw new RuntimeException("LocalFile: failed to count entities", e);
+                throw log.errored(StorageOp.COUNT, descriptor.collection(),
+                    new RuntimeException("LocalFile: failed to count entities", e));
             }
         }, StorageExecutors.async());
     }
@@ -197,25 +230,28 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                 if (!Files.exists(collectionDir)) return Stream.empty();
 
                 String ext = "." + fileExtension();
-                List<Path> jsonFiles;
+                List<Path> files;
                 try (java.util.stream.Stream<Path> paths = Files.walk(collectionDir, 1)) {
-                    jsonFiles = paths
+                    files = paths
                         .filter(p -> p.toString().endsWith(ext) && !p.equals(collectionDir))
                         .collect(Collectors.toList());
                 }
 
-                List<V> results = new ArrayList<>(jsonFiles.size());
-                for (Path path : jsonFiles) {
+                List<V> results = new ArrayList<>(files.size());
+                for (Path path : files) {
+                    String fileName = path.getFileName().toString();
                     try {
                         byte[] data = Files.readAllBytes(path);
                         results.add(descriptor.codec().decode(data));
                     } catch (Exception e) {
-                        // skip corrupted files
+                        // skip corrupted files but log a WARN (not silently swallow)
+                        log.skippedCorruptedRow(descriptor.collection(), fileName, e);
                     }
                 }
                 return results.stream();
             } catch (IOException e) {
-                throw new RuntimeException("LocalFile: failed to stream all entities", e);
+                throw log.errored(StorageOp.SCAN_ALL, descriptor.collection(),
+                    new RuntimeException("LocalFile: failed to stream all entities", e));
             }
         }, StorageExecutors.async());
     }
@@ -246,12 +282,14 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             }
         }
 
+        long startMs = System.currentTimeMillis();
         return all().thenApply(stream -> {
             List<V> result = new ArrayList<>();
             stream.forEach(entity -> {
                 JsonNode tree = IndexValueExtractor.toTree(entity);
                 if (matchesAll(tree, query)) result.add(entity);
             });
+            log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
             return result;
         });
     }

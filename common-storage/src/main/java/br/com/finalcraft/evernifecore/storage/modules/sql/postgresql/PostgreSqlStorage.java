@@ -1,6 +1,7 @@
 package br.com.finalcraft.evernifecore.storage.modules.sql.postgresql;
 
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlConfig;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlRepository;
 import br.com.finalcraft.evernifecore.storage.modules.sql.SqlStorage;
@@ -28,7 +29,11 @@ import br.com.finalcraft.evernifecore.storage.modules.sql.SqlStorage;
 public class PostgreSqlStorage extends SqlStorage {
 
     public PostgreSqlStorage(SqlConfig config) {
-        super(config);
+        this(config, StorageLogConfig.defaults());
+    }
+
+    public PostgreSqlStorage(SqlConfig config, StorageLogConfig logConfig) {
+        super(config, logConfig, "postgresql");
     }
 
     /**
@@ -43,6 +48,6 @@ public class PostgreSqlStorage extends SqlStorage {
 
     @Override
     protected <K, V> SqlRepository<K, V> createRepository(EntityDescriptor<K, V> descriptor) {
-        return new PostgreSqlRepository<>(descriptor, getDataSource(), txConnection);
+        return new PostgreSqlRepository<>(descriptor, getDataSource(), txConnection, storageLog());
     }
 }

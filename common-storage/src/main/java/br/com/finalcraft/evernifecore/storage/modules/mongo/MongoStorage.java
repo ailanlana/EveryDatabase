@@ -1,10 +1,14 @@
 package br.com.finalcraft.evernifecore.storage.modules.mongo;
 
+import br.com.finalcraft.evernifecore.storage.Storage;
 import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.HealthStatus;
 import br.com.finalcraft.evernifecore.storage.Repository;
-import br.com.finalcraft.evernifecore.storage.Storage;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogConfig;
+import br.com.finalcraft.evernifecore.storage.log.StorageLogLevel;
+import br.com.finalcraft.evernifecore.storage.log.StorageOp;
 import br.com.finalcraft.evernifecore.storage.schema.Migration;
 import br.com.finalcraft.evernifecore.storage.schema.MigrationContext;
 import br.com.finalcraft.evernifecore.storage.schema.SchemaAwareStorage;
@@ -54,8 +58,40 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     /** Registered migrations, sorted by version. Mutated only before migrate() is called. */
     private final List<Migration> registeredMigrations = new ArrayList<>();
 
+    // ------------------------------------------------------------------
+    //  Logging
+    // ------------------------------------------------------------------
+
+    private volatile StorageLogConfig logConfig;
+    private final StorageLog log;
+
+    // ------------------------------------------------------------------
+    //  Constructors
+    // ------------------------------------------------------------------
+
     public MongoStorage(MongoConfig config) {
-        this.config = config;
+        this(config, StorageLogConfig.defaults());
+    }
+
+    public MongoStorage(MongoConfig config, StorageLogConfig logConfig) {
+        this.config    = config;
+        this.logConfig = logConfig;
+        this.log       = new StorageLog("mongo", () -> this.logConfig);
+    }
+
+    // ------------------------------------------------------------------
+    //  Storage.getStorageLogConfig / setStorageLogConfig
+    // ------------------------------------------------------------------
+
+    @Override
+    public StorageLogConfig getStorageLogConfig() {
+        return logConfig;
+    }
+
+    @Override
+    public Storage setStorageLogConfig(StorageLogConfig config) {
+        this.logConfig = config;
+        return this;
     }
 
     // ------------------------------------------------------------------
@@ -74,9 +110,15 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                 )
             );
 
-            mongoClient = MongoClients.create(builder.build());
-            database    = mongoClient.getDatabase(config.database());
-            database.runCommand(new Document("ping", 1));  // verify connection
+            try {
+                mongoClient = MongoClients.create(builder.build());
+                database    = mongoClient.getDatabase(config.database());
+                database.runCommand(new Document("ping", 1));  // verify connection
+            } catch (Exception e) {
+                throw log.errored(StorageOp.INIT, null,
+                    new RuntimeException("Mongo: failed to connect to " + config.connectionString(), e));
+            }
+            log.initialized("db=" + config.database() + " uri=" + config.connectionString());
             return null;
         }, StorageExecutors.async());
     }
@@ -90,6 +132,7 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                 database    = null;
             }
             repositories.clear();
+            log.closed();
             return null;
         }, StorageExecutors.async());
     }
@@ -97,12 +140,20 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     @Override
     public CompletableFuture<HealthStatus> health() {
         return CompletableFuture.supplyAsync(() -> {
-            if (database == null) return HealthStatus.down("Not initialized");
+            if (database == null) {
+                log.emit(StorageOp.HEALTH, StorageLogLevel.WARN, b -> b.detail("not initialized"));
+                return HealthStatus.down("Not initialized");
+            }
             try {
                 long start = System.currentTimeMillis();
                 database.runCommand(new Document("ping", 1));
-                return HealthStatus.ok(System.currentTimeMillis() - start);
+                long ping = System.currentTimeMillis() - start;
+                log.emit(StorageOp.HEALTH, StorageLogLevel.DEBUG,
+                    b -> b.durationMs(ping).detail("connected=true"));
+                return HealthStatus.ok(ping);
             } catch (Exception e) {
+                log.emit(StorageOp.HEALTH, StorageLogLevel.WARN,
+                    b -> b.detail("ping failed: " + e.getMessage()).error(e));
                 return HealthStatus.down(e.getMessage());
             }
         }, StorageExecutors.async());
@@ -130,7 +181,8 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                 MongoRepository<K, V> repo = new MongoRepository<>(
                     descriptor,
                     database.getCollection(descriptor.collection()),
-                    null  // no transaction session
+                    null,  // no transaction session
+                    log
                 );
                 repo.ensureIndexes();
                 return repo;
@@ -147,17 +199,27 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
         return CompletableFuture.supplyAsync(() -> {
             ClientSession session = mongoClient.startSession();
             session.startTransaction();
-            MongoTransactionScope scope = new MongoTransactionScope(database, session);
+            MongoTransactionScope scope = new MongoTransactionScope(database, session, log);
+            long startMs = System.currentTimeMillis();
+            log.txBegin(null);
 
             try {
                 R result = work.apply(scope).join();
 
-                if (scope.isRolledBack()) session.abortTransaction();
-                else                      session.commitTransaction();
+                if (scope.isRolledBack()) {
+                    session.abortTransaction();
+                    log.txRollback(null, System.currentTimeMillis() - startMs, null);
+                } else {
+                    session.commitTransaction();
+                    log.txCommit(null, System.currentTimeMillis() - startMs);
+                }
 
                 return result;
             } catch (Exception e) {
-                try { session.abortTransaction(); } catch (Exception ignored) {}
+                try {
+                    session.abortTransaction();
+                    log.txRollback(null, System.currentTimeMillis() - startMs, e);
+                } catch (Exception ignored) {}
                 if (e instanceof RuntimeException) throw (RuntimeException) e;
                 throw new RuntimeException("Mongo transaction failed", e);
             } finally {
@@ -194,14 +256,12 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
     public CompletableFuture<List<Migration>> pending() {
         return CompletableFuture.supplyAsync(() -> {
             MongoCollection<Document> col = database.getCollection(MIGRATIONS_COLLECTION);
-
             // Collect all applied versions into a set for O(1) lookup
             Set<String> applied = new HashSet<>();
             for (Document doc : col.find()) {
                 String v = doc.getString("version");
                 if (v != null) applied.add(v);
             }
-
             List<Migration> pending = new ArrayList<>();
             for (Migration m : registeredMigrations) {
                 if (!applied.contains(m.version())) pending.add(m);
@@ -222,18 +282,32 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                 if (v != null) applied.add(v);
             }
 
+            int pendingCount = 0;
+            for (Migration m : registeredMigrations) {
+                if (!applied.contains(m.version())) pendingCount++;
+            }
+            log.migrationPending(pendingCount);
+
             MigrationContext ctx = new MongoMigrationContext(database);
+            int appliedCount = 0;
+            int skippedCount = 0;
+            String lastVersion = null;
 
             for (Migration migration : registeredMigrations) {
-                if (applied.contains(migration.version())) continue; // already applied
+                if (applied.contains(migration.version())) {
+                    log.migrationSkipped(migration.version());
+                    skippedCount++;
+                    continue;
+                }
 
+                long startMs = System.currentTimeMillis();
                 try {
                     migration.execute(ctx);
                 } catch (Exception e) {
-                    throw new RuntimeException(
-                        "Mongo migration " + migration.version()
-                        + " [" + migration.description() + "] failed", e
-                    );
+                    throw log.errored(StorageOp.MIGRATION_APPLY, null,
+                        new RuntimeException(
+                            "Mongo migration " + migration.version()
+                            + " [" + migration.description() + "] failed", e));
                 }
 
                 // Record successful application
@@ -242,13 +316,22 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                     .append("description", migration.description())
                     .append("applied_at",  System.currentTimeMillis())
                 );
+                log.migrationApplied(migration.version(), migration.description(),
+                    System.currentTimeMillis() - startMs);
+                appliedCount++;
+                lastVersion = migration.version();
             }
+
+            String target = lastVersion != null ? lastVersion
+                : (registeredMigrations.isEmpty() ? "none"
+                   : registeredMigrations.get(registeredMigrations.size() - 1).version());
+            log.migrationComplete(appliedCount, skippedCount, target);
             return null;
         }, StorageExecutors.async());
     }
 
     // ------------------------------------------------------------------
-    //  Private: MigrationContext implementation for Mongo
+    //  Private: MigrationContext
     // ------------------------------------------------------------------
 
     private static final class MongoMigrationContext implements MigrationContext {

@@ -5,6 +5,8 @@ import br.com.finalcraft.evernifecore.storage.StorageExecutors;
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
 import br.com.finalcraft.evernifecore.storage.codec.CodecException;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
+import br.com.finalcraft.evernifecore.storage.log.StorageOp;
 import br.com.finalcraft.evernifecore.storage.query.IndexHint;
 import br.com.finalcraft.evernifecore.storage.query.IndexValueExtractor;
 import br.com.finalcraft.evernifecore.storage.query.Query;
@@ -67,14 +69,17 @@ final class MongoRepository<K, V> implements Repository<K, V> {
     private final MongoCollection<Document> collection;
     /** Non-null only when operating inside a transaction. */
     private final ClientSession session;
+    private final StorageLog log;
 
     /** Indexed field paths declared on the descriptor; key = fieldPath. */
     private final Map<String, IndexHint> hintsByPath;
 
-    MongoRepository(EntityDescriptor<K, V> descriptor, MongoCollection<Document> collection, ClientSession session) {
+    MongoRepository(EntityDescriptor<K, V> descriptor, MongoCollection<Document> collection,
+                    ClientSession session, StorageLog log) {
         this.descriptor = descriptor;
         this.collection = collection;
         this.session    = session;
+        this.log        = log;
 
         this.hintsByPath = new HashMap<>();
         for (IndexHint hint : descriptor.indexes()) {
@@ -84,21 +89,22 @@ final class MongoRepository<K, V> implements Repository<K, V> {
 
     /**
      * Reconciles this collection's indexes with the descriptor's declared {@link IndexHint}s:
-     * creates the unique key index, creates a (non-unique) index for every declared hint,
-     * drops any {@code _idx_*} index that is no longer declared, and auto-populates the
-     * {@code _idx_*} field of freshly created indexes on the existing documents.
-     *
-     * <p>Called once by {@code MongoStorage.repository()} when the repo is first obtained.
+     * creates the unique key index, creates (non-unique) indexes for every declared hint,
+     * drops any {@code _idx_*} index that is no longer declared, and auto-populates freshly
+     * added {@code _idx_*} fields on existing documents.
      */
     void ensureIndexes() {
         // Unique index on the storage key - this is entity identity, not an IndexHint.
+        long reconcileStart = System.currentTimeMillis();
         collection.createIndex(Indexes.ascending(COL_KEY), new IndexOptions().unique(true));
 
-        // Snapshot the _idx_ indexes that already exist (field -> index name) before creating new ones.
+        // Snapshot existing _idx_ indexes before modifying
         Map<String, String> existing = existingIndexFields();
 
         Set<String> declaredFields = new HashSet<>();
         List<IndexHint> newHints = new ArrayList<>();
+        List<String> createdFields = new ArrayList<>();
+
         for (IndexHint hint : hintsByPath.values()) {
             String field = hint.indexColumnName();
             declaredFields.add(field);
@@ -106,18 +112,32 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                 ? Indexes.descending(field)
                 : Indexes.ascending(field);
             collection.createIndex(def);
-            if (!existing.containsKey(field)) newHints.add(hint);
-        }
 
-        // Enforcement: drop _idx_ indexes that are no longer declared.
-        for (Map.Entry<String, String> entry : existing.entrySet()) {
-            if (!declaredFields.contains(entry.getKey())) {
-                collection.dropIndex(entry.getValue());
+            if (!existing.containsKey(field)) {
+                newHints.add(hint);
+                createdFields.add(hint.fieldPath());
+                log.indexCreated(descriptor.collection(), hint);
             }
         }
 
-        // Auto-populate the _idx_ field of freshly created indexes on the existing documents.
-        if (!newHints.isEmpty()) backfillIndexFields(newHints);
+        // Enforcement: drop _idx_ indexes that are no longer declared.
+        List<String> droppedColumns = new ArrayList<>();
+        for (Map.Entry<String, String> entry : existing.entrySet()) {
+            if (!declaredFields.contains(entry.getKey())) {
+                collection.dropIndex(entry.getValue());
+                droppedColumns.add(entry.getKey());
+                log.indexDropped(descriptor.collection(), entry.getKey());
+            }
+        }
+
+        // Auto-populate _idx_ fields on existing documents for newly created indexes
+        long backfilled = 0L;
+        if (!newHints.isEmpty()) {
+            backfilled = backfillIndexFields(newHints);
+        }
+
+        long elapsed = System.currentTimeMillis() - reconcileStart;
+        log.reconcileSummary(descriptor.collection(), createdFields, droppedColumns, backfilled, elapsed);
     }
 
     /** Maps each existing {@code _idx_*} index's backing field to its Mongo index name. */
@@ -140,7 +160,11 @@ final class MongoRepository<K, V> implements Repository<K, V> {
      * {@link IndexValueExtractor} used at {@code save()} time, and {@code $set}s it.
      * Documents whose data cannot be decoded are skipped.
      */
-    private void backfillIndexFields(List<IndexHint> newHints) {
+    private long backfillIndexFields(List<IndexHint> newHints) {
+        long total = collection.countDocuments();
+        StorageLog.ProgressTracker tracker = log.newProgressTracker(StorageOp.INDEX_BACKFILL, descriptor.collection());
+        long updated = 0L;
+
         for (Document doc : collection.find()) {
             Object key = doc.get(COL_KEY);
             if (key == null) continue;
@@ -148,6 +172,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             try {
                 entity = decodeEntity(doc);
             } catch (CodecException e) {
+                log.skippedCorruptedRow(descriptor.collection(), String.valueOf(key), e);
                 continue;
             }
             JsonNode tree = IndexValueExtractor.toTree(entity);
@@ -157,7 +182,12 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                 set.append(hint.indexColumnName(), toMongoValue(value, hint));
             }
             collection.updateOne(Filters.eq(COL_KEY, key), new Document("$set", set));
+            updated++;
+            tracker.tick(updated, total);
         }
+
+        tracker.finish(updated);
+        return updated;
     }
 
     // ------------------------------------------------------------------
@@ -175,7 +205,8 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             try {
                 return Optional.of(decodeEntity(found));
             } catch (CodecException e) {
-                throw new RuntimeException("Mongo codec error for key=" + key, e);
+                throw log.errored(StorageOp.FIND, descriptor.collection(),
+                    new RuntimeException("Mongo codec error for key=" + key, e));
             }
         }, StorageExecutors.async());
     }
@@ -202,32 +233,44 @@ final class MongoRepository<K, V> implements Repository<K, V> {
 
         K key = descriptor.keyExtractor().apply(entity);
         return CompletableFuture.supplyAsync(() -> {
-            try {
-                byte[] data = descriptor.codec().encode(entity);
-                Document doc = new Document()
-                    .append(COL_KEY,  key.toString())
-                    .append(COL_DATA, toDataDoc(data));
-
-                // Populate _idx_* sibling fields for every declared IndexHint.
-                if (!hintsByPath.isEmpty()) {
-                    JsonNode tree = IndexValueExtractor.toTree(entity);
-                    for (IndexHint hint : hintsByPath.values()) {
-                        Object value = IndexValueExtractor.extract(tree, hint);
-                        // Store TIMESTAMP as BSON Date so Compass shows human-readable values.
-                        doc.append(hint.indexColumnName(), toMongoValue(value, hint));
-                    }
-                }
-
-                ReplaceOptions opts = new ReplaceOptions().upsert(true);
-                if (session != null)
-                    collection.replaceOne(session, Filters.eq(COL_KEY, key.toString()), doc, opts);
-                else
-                    collection.replaceOne(Filters.eq(COL_KEY, key.toString()), doc, opts);
-                return null;
-            } catch (CodecException e) {
-                throw new RuntimeException("Mongo codec error saving key=" + key, e);
-            }
+            replaceDocument(key, entity);
+            log.saved(descriptor.collection(), key, entity);
+            return null;
         }, StorageExecutors.async());
+    }
+
+    /**
+     * Encodes {@code entity} and upserts it via {@code replaceOne} (non-versioned path).
+     * Shared by {@link #save} (which logs a single {@code SAVE} event) and {@link #saveAll}'s
+     * non-versioned fan-out (which logs one {@code SAVE_BATCH} summary instead - logging here
+     * too would emit one event per entity).
+     */
+    private void replaceDocument(K key, V entity) {
+        try {
+            byte[] data = descriptor.codec().encode(entity);
+            Document doc = new Document()
+                .append(COL_KEY,  key.toString())
+                .append(COL_DATA, toDataDoc(data));
+
+            // Populate _idx_* sibling fields for every declared IndexHint.
+            if (!hintsByPath.isEmpty()) {
+                JsonNode tree = IndexValueExtractor.toTree(entity);
+                for (IndexHint hint : hintsByPath.values()) {
+                    Object value = IndexValueExtractor.extract(tree, hint);
+                    // Store TIMESTAMP as BSON Date so Compass shows human-readable values.
+                    doc.append(hint.indexColumnName(), toMongoValue(value, hint));
+                }
+            }
+
+            ReplaceOptions opts = new ReplaceOptions().upsert(true);
+            if (session != null)
+                collection.replaceOne(session, Filters.eq(COL_KEY, key.toString()), doc, opts);
+            else
+                collection.replaceOne(Filters.eq(COL_KEY, key.toString()), doc, opts);
+        } catch (CodecException e) {
+            throw log.errored(StorageOp.SAVE, descriptor.collection(),
+                new RuntimeException("Mongo codec error saving key=" + key, e));
+        }
     }
 
     /**
@@ -256,8 +299,6 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             try {
                 // Determine the new version upfront so we can embed it in the JSON blob.
                 long newVersion = incomingVersion + 1;
-
-                // Build the $set document for _data and all index fields.
                 // For INSERT path we'll re-encode with version 0.
                 // For UPDATE path we encode with incomingVersion+1 before the update attempt.
                 descriptor.versionSetter().accept(entity, newVersion);
@@ -322,25 +363,40 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                         long actualVersion = found != null
                             ? ((Number) found.get(COL_VERSION)).longValue()
                             : -1L;
+                        log.optimisticLockConflict(descriptor.collection(), key, incomingVersion, actualVersion);
                         throw new OptimisticLockException(
                             descriptor.type(), key, incomingVersion, actualVersion);
                     }
                 }
                 // If matchedCount > 0 the entity already has newVersion set (we set it before the update).
+                log.saved(descriptor.collection(), key, entity);
                 return null;
             } catch (OptimisticLockException ole) {
                 throw ole;
             } catch (CodecException e) {
-                throw new RuntimeException("Mongo codec error saving key=" + key, e);
+                throw log.errored(StorageOp.SAVE, descriptor.collection(),
+                    new RuntimeException("Mongo codec error saving key=" + key, e));
             }
         }, StorageExecutors.async());
     }
 
     @Override
     public CompletableFuture<Void> saveAll(Collection<V> entities) {
-        List<CompletableFuture<Void>> futures = new ArrayList<>(entities.size());
-        for (V entity : entities) futures.add(save(entity));
-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+        long startMs = System.currentTimeMillis();
+        long count = entities.size();
+        boolean versioned = descriptor.isVersioned();
+        List<CompletableFuture<Void>> futures = new ArrayList<>((int) count);
+        for (V entity : entities) {
+            if (versioned) {
+                // Optimistic-lock check-then-act per entity - reuse save() as-is.
+                futures.add(save(entity));
+            } else {
+                K key = descriptor.keyExtractor().apply(entity);
+                futures.add(CompletableFuture.runAsync(() -> replaceDocument(key, entity), StorageExecutors.async()));
+            }
+        }
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+            .thenRun(() -> log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs));
     }
 
     @Override
@@ -349,7 +405,9 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             long count = session != null
                 ? collection.deleteOne(session, Filters.eq(COL_KEY, key.toString())).getDeletedCount()
                 : collection.deleteOne(Filters.eq(COL_KEY, key.toString())).getDeletedCount();
-            return count > 0;
+            boolean existed = count > 0;
+            log.deleted(descriptor.collection(), key, existed);
+            return existed;
         }, StorageExecutors.async());
     }
 
@@ -403,11 +461,15 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             filters.add(toFilter(c, hint));
         }
         Bson combined = filters.size() == 1 ? filters.get(0) : Filters.and(filters);
+        long startMs = System.currentTimeMillis();
+
         return CompletableFuture.supplyAsync(() -> {
             FindIterable<Document> found = session != null
                 ? collection.find(session, combined)
                 : collection.find(combined);
-            return decodeAll(found);
+            List<V> result = decodeAll(found);
+            log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
+            return result;
         }, StorageExecutors.async());
     }
 
@@ -448,12 +510,19 @@ final class MongoRepository<K, V> implements Repository<K, V> {
     //  Internal
     // ------------------------------------------------------------------
 
+    /**
+     * Decodes all documents in the iterable. Documents that cannot be decoded emit a WARN
+     * log entry and are skipped (consistent with the "skip corrupted" contract).
+     */
     private List<V> decodeAll(FindIterable<Document> docs) {
         List<V> result = new ArrayList<>();
         for (Document doc : docs) {
+            Object key = doc.get(COL_KEY);
             try {
                 result.add(decodeEntity(doc));
-            } catch (CodecException ignored) {}
+            } catch (CodecException e) {
+                log.skippedCorruptedRow(descriptor.collection(), String.valueOf(key), e);
+            }
         }
         return result;
     }

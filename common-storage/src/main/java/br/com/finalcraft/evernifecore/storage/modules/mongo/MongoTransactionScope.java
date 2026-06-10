@@ -2,6 +2,7 @@ package br.com.finalcraft.evernifecore.storage.modules.mongo;
 
 import br.com.finalcraft.evernifecore.storage.EntityDescriptor;
 import br.com.finalcraft.evernifecore.storage.Repository;
+import br.com.finalcraft.evernifecore.storage.log.StorageLog;
 import br.com.finalcraft.evernifecore.storage.tx.TransactionScope;
 import com.mongodb.client.ClientSession;
 import com.mongodb.client.MongoDatabase;
@@ -17,11 +18,13 @@ final class MongoTransactionScope implements TransactionScope {
 
     private final MongoDatabase database;
     private final ClientSession session;
+    private final StorageLog    log;
     private boolean rolledBack = false;
 
-    MongoTransactionScope(MongoDatabase database, ClientSession session) {
+    MongoTransactionScope(MongoDatabase database, ClientSession session, StorageLog log) {
         this.database = database;
         this.session  = session;
+        this.log      = log;
     }
 
     @Override
@@ -29,7 +32,8 @@ final class MongoTransactionScope implements TransactionScope {
         return new MongoRepository<>(
             descriptor,
             database.getCollection(descriptor.collection()),
-            session
+            session,
+            log
         );
     }
 
