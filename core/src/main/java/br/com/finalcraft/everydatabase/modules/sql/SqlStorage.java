@@ -162,7 +162,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
             }
             log.initialized("pool=" + hc.getPoolName() + " url=" + config.jdbcUrl());
             return null;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -171,7 +171,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
             if (dataSource != null && !dataSource.isClosed()) dataSource.close();
             log.closed();
             return null;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -197,7 +197,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                     b -> b.detail("Connection error: " + e.getMessage()).error(e));
                 return HealthStatus.down("Connection error: " + e.getMessage());
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     // ------------------------------------------------------------------
@@ -318,7 +318,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                 txConnection.remove();
                 try { conn.setAutoCommit(true); conn.close(); } catch (SQLException ignored) {}
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     // ------------------------------------------------------------------
@@ -349,7 +349,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                 throw log.errored(StorageOp.MIGRATION_PENDING, null,
                     new RuntimeException("SQL: currentVersion() failed", e));
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -367,7 +367,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                 throw log.errored(StorageOp.MIGRATION_PENDING, null,
                     new RuntimeException("SQL: pending() failed", e));
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -423,7 +423,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
                 throw log.errored(StorageOp.MIGRATION_COMPLETE, null,
                     new RuntimeException("SQL: migrate() failed", e));
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     // ------------------------------------------------------------------

@@ -115,7 +115,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             } finally {
                 lock.readLock().unlock();
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -140,7 +140,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             writeFile(key, entity);
             log.saved(descriptor.collection(), key, entity);
             return null;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -150,7 +150,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
         List<CompletableFuture<Void>> futures = new ArrayList<>((int) count);
         for (V entity : entities) {
             K key = descriptor.keyExtractor().apply(entity);
-            futures.add(CompletableFuture.runAsync(() -> writeFile(key, entity), StorageExecutors.async()));
+            futures.add(CompletableFuture.runAsync(() -> writeFile(key, entity), StorageExecutors.get()));
         }
         return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
             .thenRun(() -> log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs));
@@ -217,14 +217,14 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
             } finally {
                 lock.writeLock().unlock();
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
     public CompletableFuture<Boolean> exists(K key) {
         return CompletableFuture.supplyAsync(
             () -> Files.exists(keyToPath(key)),
-            StorageExecutors.async()
+            StorageExecutors.get()
         );
     }
 
@@ -243,7 +243,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                 throw log.errored(StorageOp.COUNT, descriptor.collection(),
                     new RuntimeException("LocalFile: failed to count entities", e));
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -276,7 +276,7 @@ final class LocalFileRepository<K, V> implements Repository<K, V> {
                 throw log.errored(StorageOp.SCAN_ALL, descriptor.collection(),
                     new RuntimeException("LocalFile: failed to stream all entities", e));
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     // ------------------------------------------------------------------

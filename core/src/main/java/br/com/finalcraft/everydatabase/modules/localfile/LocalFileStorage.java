@@ -113,7 +113,7 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
             }
             log.initialized("dir=" + config.baseDirectory());
             return null;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -183,7 +183,7 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
             if (entries.isEmpty()) return SchemaVersion.none();
             AppliedEntry latest = entries.get(entries.size() - 1);
             return new SchemaVersion(latest.version, latest.applied_at);
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -195,7 +195,7 @@ public final class LocalFileStorage implements Storage, SchemaAwareStorage {
                 if (!applied.contains(m.version())) pending.add(m);
             }
             return pending;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override

@@ -218,7 +218,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                 throw log.errored(StorageOp.FIND, descriptor.collection(),
                     new RuntimeException("Mongo codec error for key=" + key, e));
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -232,7 +232,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                 : collection.find(Filters.in(COL_KEY, keyStrings));
 
             return decodeAll(found);
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -246,7 +246,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             replaceDocument(key, entity);
             log.saved(descriptor.collection(), key, entity);
             return null;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     /**
@@ -413,7 +413,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                 throw log.errored(StorageOp.SAVE, descriptor.collection(),
                     new RuntimeException("Mongo codec error saving key=" + key, e));
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     /**
@@ -461,7 +461,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
 
             log.savedBatch(descriptor.collection(), count, System.currentTimeMillis() - startMs);
             return null;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     private void bulkWriteChunk(List<ReplaceOneModel<Document>> models, BulkWriteOptions opts) {
@@ -478,7 +478,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             boolean existed = count > 0;
             log.deleted(descriptor.collection(), key, existed);
             return existed;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -488,14 +488,14 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                 ? collection.find(session, Filters.eq(COL_KEY, key.toString())).first()
                 : collection.find(Filters.eq(COL_KEY, key.toString())).first();
             return found != null;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
     public CompletableFuture<Long> count() {
         return CompletableFuture.supplyAsync(
             () -> session != null ? collection.countDocuments(session) : collection.countDocuments(),
-            StorageExecutors.async()
+            StorageExecutors.get()
         );
     }
 
@@ -504,7 +504,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
         return CompletableFuture.supplyAsync(() -> {
             FindIterable<Document> all = session != null ? collection.find(session) : collection.find();
             return decodeAll(all).stream();
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     // ------------------------------------------------------------------
@@ -540,7 +540,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             List<V> result = decodeAll(found);
             log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
             return result;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     private Bson toFilter(Query.Condition c, IndexHint hint) {

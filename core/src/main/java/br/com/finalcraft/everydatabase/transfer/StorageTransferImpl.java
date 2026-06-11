@@ -139,7 +139,7 @@ final class StorageTransferImpl implements StorageTransfer {
                         + " collections=" + built.collections().size()
                         + " errors=" + built.errors().size()));
             return built;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     // ------------------------------------------------------------------

@@ -59,7 +59,7 @@ public final class StorageExecutors {
         return pool;
     }
 
-    public static Executor async() {
+    public static Executor get() {
         return EXECUTOR;
     }
 }

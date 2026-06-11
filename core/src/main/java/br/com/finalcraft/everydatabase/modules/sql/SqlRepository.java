@@ -582,7 +582,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             } catch (SQLException | CodecException e) {
                 throw new RuntimeException("SQL operation failed", e);
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     // ------------------------------------------------------------------

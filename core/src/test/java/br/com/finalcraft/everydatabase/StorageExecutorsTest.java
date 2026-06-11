@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Exercises the pre-Java-21 fallback pool directly (the test JVM is 21+, so
- * {@link StorageExecutors#async()} itself returns a virtual-thread executor).
+ * {@link StorageExecutors#get()} itself returns a virtual-thread executor).
  *
  * <p>Guards against the historical bug where the fallback was created as
  * {@code ThreadPoolExecutor(1, cores, ..., unbounded queue)}: with an unbounded queue the

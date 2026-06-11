@@ -117,7 +117,7 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
             }
             log.initialized("db=" + config.database() + " uri=" + config.connectionString());
             return null;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -131,7 +131,7 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
             repositories.clear();
             log.closed();
             return null;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -153,7 +153,7 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                     b -> b.detail("ping failed: " + e.getMessage()).error(e));
                 return HealthStatus.down(e.getMessage());
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     // ------------------------------------------------------------------
@@ -222,7 +222,7 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
             } finally {
                 session.close();
             }
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     // ------------------------------------------------------------------
@@ -246,7 +246,7 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                 .first();
             if (latest == null) return SchemaVersion.none();
             return new SchemaVersion(latest.getString("version"), latest.getLong("applied_at"));
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -264,7 +264,7 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                 if (!applied.contains(m.version())) pending.add(m);
             }
             return pending;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     @Override
@@ -324,7 +324,7 @@ public final class MongoStorage implements Storage, TransactionalStorage, Schema
                    : registeredMigrations.get(registeredMigrations.size() - 1).version());
             log.migrationComplete(appliedCount, skippedCount, target);
             return null;
-        }, StorageExecutors.async());
+        }, StorageExecutors.get());
     }
 
     // ------------------------------------------------------------------
