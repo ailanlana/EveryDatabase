@@ -137,22 +137,22 @@ public final class StorageLogConfig {
      *
      * <p>Set this during testing to increase verbosity without changing any application code:
      * <pre>
-     * -Devernifecore.storage.log.level=info      # see lifecycle, index, migration events
-     * -Devernifecore.storage.log.level=debug     # see batch sizes, queries, progress ticks
-     * -Devernifecore.storage.log.level=trace     # maximum verbosity (per-entity ops)
+     * -Deverydatabase.log.level=info      # see lifecycle, index, migration events
+     * -Deverydatabase.log.level=debug     # see batch sizes, queries, progress ticks
+     * -Deverydatabase.log.level=trace     # maximum verbosity (per-entity ops)
      * </pre>
      *
      * <p>In production, this property should not be set; the default {@link StorageLogLevel#WARN}
      * applies and routine operations remain silent.
      */
-    public static final String SYSTEM_PROPERTY_DEFAULT_LEVEL = "evernifecore.storage.log.level";
+    public static final String SYSTEM_PROPERTY_DEFAULT_LEVEL = "everydatabase.log.level";
 
     /**
      * Default preset: {@code WARN} global threshold.
      * Routine events (INFO/DEBUG/TRACE) are silent; failures and warnings are visible.
      *
      * <p>If the system property {@value #SYSTEM_PROPERTY_DEFAULT_LEVEL} is set, its value
-     * overrides the threshold (e.g. {@code -Devernifecore.storage.log.level=info}).
+     * overrides the threshold (e.g. {@code -Deverydatabase.log.level=info}).
      */
     public static StorageLogConfig defaults() {
         StorageLogConfig cfg = new StorageLogConfig();

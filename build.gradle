@@ -6,7 +6,7 @@ subprojects {
     apply plugin: 'idea'
     apply plugin: 'maven-publish'
 
-    group = 'br.com.finalcraft'
+    group = 'br.com.finalcraft.everydatabase'
     version = '1.0.1'
 
     //This might keep function(parameter variable's Names) on the compiled jar
@@ -44,11 +44,6 @@ subprojects {
         withSourcesJar()
     }
 
-    publishing {
-        publications {
-            maven(MavenPublication) {
-                from components.java
-            }
-        }
-    }
+    // Publications are defined per module (each sets its own everydatabase-* artifactId):
+    // common and libby publish 'components.java'; standalone publishes the shadow jar.
 }

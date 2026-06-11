@@ -20,6 +20,7 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 - [Why](#why)
 - [Supported backends](#supported-backends)
 - [Install](#install)
+- [Distribution flavors](#distribution-flavors)
 - [Quick start](#quick-start)
 - [Core concepts](#core-concepts)
 - [Instantiating each backend](#instantiating-each-backend)
@@ -66,7 +67,7 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 
 ## Install
 
-The library is published to a public Maven repository.
+The library is published to a public Maven repository in **three flavors** — same code, same API, different packaging (see [Distribution flavors](#distribution-flavors)). Pick exactly one.
 
 **Gradle**
 
@@ -77,13 +78,19 @@ repositories {
 }
 
 dependencies {
-    implementation 'br.com.finalcraft:common-storage:1.0.1'
+    // RECOMMENDED — everything bundled & relocated, zero transitive deps, works anywhere:
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-standalone:1.0.1'
 
-    // Bundled transitively: HikariCP, mongodb-driver-sync, H2, Jackson (databind + yaml).
-    // You must add the JDBC driver for your SQL engine yourself:
+    // OR lean — you provide HikariCP/Jackson/Mongo-driver/H2 yourself:
+    //implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
+
+    // OR runtime download — downloads the libraries at runtime via Libby:
+    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.0.1'
+
+    // In EVERY flavor, the JDBC driver for MySQL/MariaDB or PostgreSQL is bring-your-own:
     runtimeOnly 'com.mysql:mysql-connector-j:9.4.0'      // MySQL / MariaDB
     runtimeOnly 'org.postgresql:postgresql:42.7.7'       // PostgreSQL
-    // (H2 is already bundled; MongoDB driver is already bundled)
+    // (H2 and the MongoDB driver are covered by standalone/libby; with core, add them yourself)
 }
 ```
 
@@ -98,52 +105,131 @@ dependencies {
 </repositories>
 
 <dependency>
-  <groupId>br.com.finalcraft</groupId>
-  <artifactId>common-storage</artifactId>
+  <groupId>br.com.finalcraft.everydatabase</groupId>
+  <!-- or everydatabase-core / everydatabase-libby -->
+  <artifactId>everydatabase-standalone</artifactId>
   <version>1.0.1</version>
 </dependency>
 ```
 
 ---
 
+## Distribution flavors
+
+All three flavors expose the exact same API — they only differ in **how the heavy runtime libraries** (HikariCP, MongoDB driver, H2, Jackson) reach your classpath. JDBC drivers for MySQL/MariaDB and PostgreSQL are bring-your-own in *every* flavor.
+
+### `everydatabase-standalone` — fat jar (recommended)
+
+One self-contained jar: the library plus all heavy dependencies, **shaded and relocated** under `br.com.finalcraft.everydatabase.libs.*` so they can never clash with other versions on your classpath. Its POM declares **zero dependencies** — drop it into any plugin or app and go.
+
+| Original package | Relocated to |
+|---|---|
+| `com.zaxxer.hikari` | `br.com.finalcraft.everydatabase.libs.hikari` |
+| `com.mongodb` | `br.com.finalcraft.everydatabase.libs.mongodb` |
+| `org.bson` | `br.com.finalcraft.everydatabase.libs.bson` |
+| `com.fasterxml.jackson` | `br.com.finalcraft.everydatabase.libs.jackson` |
+| `com.fasterxml.jackson.annotation` | **not relocated** — kept at its original coordinates (see below) |
+| `org.yaml.snakeyaml` | `br.com.finalcraft.everydatabase.libs.snakeyaml` |
+| `org.h2` | `br.com.finalcraft.everydatabase.libs.h2` |
+
+- **`org.slf4j` is bundled but *not* relocated.** HikariCP hard-requires `org.slf4j.Logger` at class-init; on parent-first plugin classloaders (Bukkit/Paper) the host's SLF4J still wins whenever it ships one, so log auto-detection keeps routing to the host's logging. The bundled copy only provides linkage on hosts without SLF4J (logging falls back to a no-op).
+- **Jackson annotations just work.** `com.fasterxml.jackson.annotation` (`@JsonProperty`, `@JsonIgnore`, `@JsonCreator`, `@JsonFormat`, ...) is bundled **at its original coordinates**: annotations are matched by class identity, so the bundled mapper honors the real annotations on your entities — no relocated imports needed. Only the *advanced* annotations that live inside databind itself (`@JsonSerialize`, `@JsonDeserialize`) remain relocated, as do public overloads that accept Jackson types (e.g. `JacksonJsonCodec(Class, ObjectMapper)` expects the *relocated* `ObjectMapper` in this flavor).
+
+### `everydatabase-core` — lean, bring-your-own
+
+Just the library. The heavy dependencies are `compileOnly`, so the published POM carries **no runtime dependencies** — you add HikariCP, the MongoDB driver, H2 and Jackson (`jackson-databind` + `jackson-dataformat-yaml`) yourself, with full control over the versions. Add only what you use (e.g. skip the Mongo driver if you only target SQL backends).
+
+### `everydatabase-libby` — runtime download
+
+`everydatabase-core` plus a small coordinator (package `br.com.finalcraft.everydatabase.libby`) that downloads the canonical, **non-relocated** libraries at runtime via [Libby](https://github.com/AlessioDP/libby) — your jar stays tiny. Bootstrap it in your plugin's `onLoad` (or earliest bootstrap), **before touching any storage class**:
+
+```java
+import br.com.finalcraft.everydatabase.libby.DependencyManager;
+import br.com.finalcraft.everydatabase.libby.EveryDatabaseDependencies;
+
+@Override
+public void onLoad() {
+    DependencyManager manager = new DependencyManager("MyPlugin", getDataFolder(), "libs");
+    EveryDatabaseDependencies.loadAll(manager);   // downloads + injects HikariCP, Mongo driver, H2, Jackson
+
+    // Optional — JDBC drivers stay opt-in even here:
+    // EveryDatabaseDependencies.loadMySqlDriver(manager);
+    // EveryDatabaseDependencies.loadPostgresDriver(manager);
+}
+```
+
+After `loadAll(...)` returns, use `Storages` normally. Note: `everydatabase-libby` itself depends on `net.byteflux:libby-core`, resolved from `https://repo.alessiodp.com/releases/` — add that repository to your build alongside the ones above.
+
+---
+
 ## Quick start
 
 ```java
-import br.com.finalcraft.evernifecore.storage.*;
-import br.com.finalcraft.evernifecore.storage.codec.JacksonJsonCodec;
-import br.com.finalcraft.evernifecore.storage.modules.sql.SqlConfig;
+
+import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
+import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
 
 // 1. A plain entity (no-arg ctor + getters/setters so Jackson can (de)serialise it).
+
 public class PlayerData {
-    private UUID uuid;
-    private String name;
-    private int score;
-    public PlayerData() {}
-    public PlayerData(UUID uuid, String name, int score) { this.uuid = uuid; this.name = name; this.score = score; }
-    public UUID getUuid()   { return uuid; }
-    public String getName() { return name; }
-    public int getScore()   { return score; }
-    // setters omitted for brevity
+  private UUID uuid;
+  private String name;
+  private int score;
+
+  public PlayerData() {
+  }
+
+  public PlayerData(UUID uuid, String name, int score) {
+    this.uuid = uuid;
+    this.name = name;
+    this.score = score;
+  }
+
+  public UUID getUuid() {
+    return uuid;
+  }
+
+  public String getName() {
+    return name;
+  }
+
+  public int getScore() {
+    return score;
+  }
+  // setters omitted for brevity
 }
 
-// 2. Describe it once.
-EntityDescriptor<UUID, PlayerData> PLAYERS = EntityDescriptor.builder(UUID.class, PlayerData.class)
-        .collection("players")
-        .keyExtractor(PlayerData::getUuid)
-        .codec(new JacksonJsonCodec<>(PlayerData.class))
-        .build();
+  // 2. Describe it once.
+  EntityDescriptor<UUID, PlayerData> PLAYERS = EntityDescriptor.builder(UUID.class, PlayerData.class)
+    .collection("players")
+    .keyExtractor(PlayerData::getUuid)
+    .codec(new JacksonJsonCodec<>(PlayerData.class))
+    .build();
 
-// 3. Pick a backend and go.
-Storage storage = Storages.createSQL(new SqlConfig("jdbc:mariadb://localhost:3306/mydb", "root", "root"));
-storage.init().join();
+  // 3. Pick a backend and go.
+  Storage storage = Storages.createSQL(new SqlConfig("jdbc:mariadb://localhost:3306/mydb", "root", "root"));
+storage.
 
-Repository<UUID, PlayerData> repo = storage.repository(PLAYERS);
+  init().
 
-repo.save(new PlayerData(UUID.randomUUID(), "Alice", 100)).join();
-Optional<PlayerData> alice = repo.find(aliceId).join();
-long total = repo.count().join();
+  join();
 
-storage.close().join();
+  Repository<UUID, PlayerData> repo = storage.repository(PLAYERS);
+
+repo.
+
+  save(new PlayerData(UUID.randomUUID(), "Alice",100)).
+
+  join();
+
+  Optional<PlayerData> alice = repo.find(aliceId).join();
+  long total = repo.count().join();
+
+storage.
+
+  close().
+
+  join();
 ```
 
 Switching to MongoDB is a one-line change — everything below `storage.repository(...)` stays identical:
@@ -183,19 +269,23 @@ You discover them with `instanceof`, so the compiler stops you from using transa
 <summary><b>MySQL / MariaDB</b></summary>
 
 ```java
-import br.com.finalcraft.evernifecore.storage.modules.sql.*;
+
 
 SqlStorage sql = Storages.createSQL(
-        new SqlConfig("jdbc:mariadb://localhost:3306/mydb", "root", "root"));
+  new SqlConfig("jdbc:mariadb://localhost:3306/mydb", "root", "root"));
 
 // Full control over the HikariCP pool (min/max, connection timeout, idle timeout;
 // a 5-arg PoolTuning constructor also exposes maxLifetime):
 SqlStorage tuned = Storages.createSQL(new SqlConfig(
-        "jdbc:mysql://db.internal:3306/app",
-        "user", "pass",
-        new PoolTuning(2, 10, Duration.ofSeconds(30), Duration.ofMinutes(10))));
+  "jdbc:mysql://db.internal:3306/app",
+  "user", "pass",
+  new PoolTuning(2, 10, Duration.ofSeconds(30), Duration.ofMinutes(10))));
 
-sql.init().join();
+sql.
+
+init().
+
+join();
 ```
 </details>
 
@@ -227,7 +317,7 @@ H2SqlStorage tcp  = Storages.createH2(new SqlConfig("jdbc:h2:tcp://localhost:909
 <summary><b>MongoDB</b></summary>
 
 ```java
-import br.com.finalcraft.evernifecore.storage.modules.mongo.MongoConfig;
+import br.com.finalcraft.everydatabase.modules.mongo.MongoConfig;
 
 MongoStorage mongo = Storages.createMongo(new MongoConfig("mongodb://localhost:27017", "mydb"));
 
@@ -243,7 +333,7 @@ mongo.init().join();
 <summary><b>Local files (one file per entity)</b></summary>
 
 ```java
-import br.com.finalcraft.evernifecore.storage.modules.localfile.LocalFileConfig;
+import br.com.finalcraft.everydatabase.modules.localfile.LocalFileConfig;
 
 LocalFileStorage file = Storages.createLocalFile(new LocalFileConfig(Path.of("data")));
 file.init().join();
@@ -471,24 +561,30 @@ Use `descriptor(sourceDesc, targetDesc)` to rename a collection or change codec 
 The library is **silent by default**: routine operations emit nothing, while failures always do (an `ERROR` floor that no configuration can switch off). Everything in between is opt-in, per **topic** (`INDEX`, `WRITE`, `DELETE`, `QUERY`, `MIGRATION`, `TRANSACTION`, `TRANSFER`, ...), with live runtime editing.
 
 ```java
-import br.com.finalcraft.evernifecore.storage.log.*;
+
 
 // Create a storage already watching index work and migrations, with writes muted:
 StorageLogConfig logCfg = StorageLogConfig.defaults()        // WARN: routine silent, failures visible
-        .level(StorageLogTopic.INDEX,     StorageLogLevel.INFO)
-        .level(StorageLogTopic.MIGRATION, StorageLogLevel.INFO)
-        .mute(StorageLogTopic.WRITE);
-SqlStorage sql = Storages.createSQL(sqlConfig, logCfg);
+  .level(StorageLogTopic.INDEX, StorageLogLevel.INFO)
+  .level(StorageLogTopic.MIGRATION, StorageLogLevel.INFO)
+  .mute(StorageLogTopic.WRITE);
+  SqlStorage sql = Storages.createSQL(sqlConfig, logCfg);
 
 // The config is LIVE - edit it at runtime and every repository reacts immediately:
-sql.getStorageLogConfig()
-   .level(StorageLogTopic.WRITE, StorageLogLevel.DEBUG)      // temporarily debug saves
-   .includeKeys(true);                                       // opt-in: show entity keys
+sql.
+
+  getStorageLogConfig()
+   .
+
+  level(StorageLogTopic.WRITE, StorageLogLevel.DEBUG)      // temporarily debug saves
+   .
+
+  includeKeys(true);                                       // opt-in: show entity keys
 ```
 
 Other presets: `StorageLogConfig.silent()` (only the ERROR floor), `verbose()` (DEBUG), `trace()`.
 
-**Where the lines go.** By default events route to **SLF4J** when it is on the runtime classpath (loggers named `evernifecore.storage.<topic>`), and become a silent no-op otherwise — the library never requires a logging framework. A host application can install its own bridge once, globally:
+**Where the lines go.** By default events route to **SLF4J** when it is on the runtime classpath (loggers named `everydatabase.<topic>`), and become a silent no-op otherwise — the library never requires a logging framework. A host application can install its own bridge once, globally:
 
 ```java
 // e.g. a Bukkit plugin routing storage logs to its own logger:
@@ -500,8 +596,8 @@ StorageLogSinks.installDefault(event -> plugin.getLogger().info(event.format()))
 **Quick verbosity for tests/CI** — no code changes needed:
 
 ```bash
--Devernifecore.storage.log.level=info     # lifecycle, index, migration, batch summaries
--Devernifecore.storage.log.level=debug    # + saves, deletes, queries, progress ticks
+-Deverydatabase.log.level=info     # lifecycle, index, migration, batch summaries
+-Deverydatabase.log.level=debug    # + saves, deletes, queries, progress ticks
 ```
 
 ---
@@ -522,7 +618,7 @@ cd EveryDatabase
 # Launch Gradle with JDK 21 (the build toolchain provisions JDK 25 by itself)
 export JAVA_HOME=/path/to/jdk-21      # PowerShell: $env:JAVA_HOME = "C:\path\to\jdk-21"
 
-./gradlew :common-storage:build       # compile + run all tests
+./gradlew :core:build       # compile + run all tests
 ```
 
 ### Integration databases via Docker
@@ -543,15 +639,15 @@ docker compose down             # stop (keeps data)
 docker compose down -v          # stop + wipe volumes
 ```
 
-Running `./gradlew :common-storage:test` brings the containers up automatically (the Gradle docker-compose plugin is wired to the `test` task). **Suites self-skip when their server is unreachable**, so the build never fails just because a database is down.
+Running `./gradlew :core:test` brings the containers up automatically (the Gradle docker-compose plugin is wired to the `test` task). **Suites self-skip when their server is unreachable**, so the build never fails just because a database is down.
 
 ### Running specific tests
 
 ```bash
-./gradlew :common-storage:test                                   # everything
-./gradlew :common-storage:test -PskipStress                      # skip the 10k-record stress suites
-./gradlew :common-storage:test --tests "*MariaDbStorageTest"     # one class
-./gradlew :common-storage:test --tests "*MariaDbStorageTest.inTransaction_commit_savesAreVisible"
+./gradlew :core:test                                   # everything
+./gradlew :core:test -PskipStress                      # skip the 10k-record stress suites
+./gradlew :core:test --tests "*MariaDbStorageTest"     # one class
+./gradlew :core:test --tests "*MariaDbStorageTest.inTransaction_commit_savesAreVisible"
 ```
 
 Override connection coordinates with env vars or `-Dkey=value` (e.g. `MARIADB_HOST`, `MONGO_USER`, `POSTGRES_URL`). Each SQL/Mongo test method runs against its own throwaway database (`enc_NNN_<backend>_<method>`), dropped automatically afterwards — set `TEST_KEEP_DATABASES=true` to keep them for inspection.
@@ -562,8 +658,8 @@ Override connection coordinates with env vars or `-Dkey=value` (e.g. `MARIADB_HO
 
 ```
 EveryDatabase/
-├── common-storage/                      # the published library (br.com.finalcraft:common-storage)
-│   ├── src/main/java/br/com/finalcraft/evernifecore/storage/
+├── core/                              # the library core (everydatabase-core) — heavy deps are compileOnly
+│   ├── src/main/java/br/com/finalcraft/everydatabase/
 │   │   ├── (root)                       # Storage, Repository, EntityDescriptor, Storages, StorageExecutors
 │   │   ├── codec/                       # JacksonJsonCodec (compact / pretty), JacksonYamlCodec
 │   │   ├── query/                       # IndexHint, @Indexed, Query
@@ -574,8 +670,10 @@ EveryDatabase/
 │   │   ├── transfer/                    # StorageTransfer, TransferReport, ErrorPolicy
 │   │   └── modules/                     # sql (+ postgresql, h2), mongo, localfile, memory
 │   └── src/test/java/                   # backend-agnostic contract suites + per-backend + stress tests
+├── standalone/                          # fat-jar flavor (everydatabase-standalone) — shadow/relocation packaging, no sources
+├── libby/                               # runtime-download flavor (everydatabase-libby) — DependencyManager, EveryDatabaseDependencies
 ├── docker-compose.yml                   # MariaDB / PostgreSQL / MongoDB for the integration suites
-└── specs/                               # design specs (storage logging)
+└── specs/                               # design specs (SPEC_storage_logging.md, SPEC_distribution_modules.md)
 ```
 
 ---
@@ -585,8 +683,8 @@ EveryDatabase/
 - **Runtime:** the library compiles to **Java 8 bytecode** (no Java 9+ APIs at runtime).
 - **Build:** authored in modern Java syntax and compiled to Java 8 via [Jabel](https://github.com/bsideup/jabel); the Gradle toolchain is **JDK 25**.
 - **Concurrency:** `StorageExecutors` uses virtual threads on Java 21+, falling back to a bounded daemon thread pool on older JVMs.
-- **Drivers:** H2 and the MongoDB driver are bundled. For MySQL/MariaDB or PostgreSQL, add the JDBC driver to your own runtime classpath.
-- **Logging:** SLF4J is **optional** — `slf4j-api` is a compile-only dependency, detected reflectively at runtime. Without it (e.g. when the library is shaded into a plugin jar) logging quietly no-ops; no `NoClassDefFoundError`, no mandatory logging framework.
+- **Drivers:** JDBC drivers for MySQL/MariaDB and PostgreSQL are bring-your-own in every flavor (`everydatabase-libby` offers opt-in download helpers). H2 and the MongoDB driver come with `standalone` (bundled, relocated) and `libby` (downloaded at runtime); with `everydatabase-core` you supply them yourself — see [Distribution flavors](#distribution-flavors).
+- **Logging:** SLF4J is **optional** — `slf4j-api` is a compile-only dependency, detected reflectively at runtime. Without it on the classpath logging quietly no-ops; no `NoClassDefFoundError`, no mandatory logging framework. (The standalone flavor bundles an unrelocated `slf4j-api` for linkage only — the host's SLF4J still wins when present.)
 - **Serialisation:** entities must be Jackson-serialisable (a no-arg constructor plus accessors, or appropriate Jackson annotations).
 
 <div align="center">

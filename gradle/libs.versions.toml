@@ -12,6 +12,8 @@ mysql = "9.4.0"
 postgresql = "42.7.7"
 instancio = "6.0.0-RC2"
 docker-compose = "0.17.12"
+shadow = "8.3.5"
+libby = "1.2.0"
 
 [libraries]
 jabel = { module = "com.github.bsideup.jabel:jabel-javac-plugin", version.ref = "jabel" }
@@ -28,6 +30,8 @@ junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", vers
 mysql-connector = { module = "com.mysql:mysql-connector-j", version.ref = "mysql" }
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
 instancio-junit = { module = "org.instancio:instancio-junit", version.ref = "instancio" }
+libby-core = { module = "net.byteflux:libby-core", version.ref = "libby" }
 
 [plugins]
 docker-compose = { id = "com.avast.gradle.docker-compose", version.ref = "docker-compose" }
+shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }

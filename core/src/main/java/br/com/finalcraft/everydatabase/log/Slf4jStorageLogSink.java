@@ -14,7 +14,7 @@ import org.slf4j.LoggerFactory;
  * class (and throw {@code NoClassDefFoundError}) when SLF4J is absent.
  *
  * <p>Each {@link StorageLogTopic} maps to its own named SLF4J logger:
- * {@code evernifecore.storage.<topic>} (all lower-case).
+ * {@code everydatabase.<topic>} (all lower-case).
  * This allows fine-grained SLF4J / Logback configuration per topic without any
  * extra storage-side configuration.
  *
@@ -39,7 +39,7 @@ final class Slf4jStorageLogSink implements StorageLogSink {
 
     @Override
     public void accept(StorageLogEvent event) {
-        Logger logger = LoggerFactory.getLogger("evernifecore.storage." + event.topic().name().toLowerCase());
+        Logger logger = LoggerFactory.getLogger("everydatabase." + event.topic().name().toLowerCase());
         String msg = event.format();
         Throwable err = event.error();
 

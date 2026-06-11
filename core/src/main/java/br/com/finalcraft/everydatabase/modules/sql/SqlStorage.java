@@ -144,7 +144,7 @@ public class SqlStorage implements Storage, TransactionalStorage, SchemaAwareSto
             hc.setConnectionTimeout(config.pool().connectTimeout().toMillis());
             hc.setIdleTimeout(config.pool().idleTimeout().toMillis());
             hc.setMaxLifetime(config.pool().maxLifetime().toMillis());
-            hc.setPoolName("EverNifeCore-SQL");
+            hc.setPoolName("EveryDatabase-SQL");
 
             try {
                 dataSource = new HikariDataSource(hc);

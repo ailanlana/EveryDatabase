@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * the {@code mute} floor, the {@value StorageLogConfig#SYSTEM_PROPERTY_DEFAULT_LEVEL}
  * override, the progress clamp, and concurrent edits.
  *
- * <p>The Gradle test task sets {@code evernifecore.storage.log.level=info} for the whole
+ * <p>The Gradle test task sets {@code everydatabase.log.level=info} for the whole
  * test JVM, so tests around {@link StorageLogConfig#defaults()} save, set and restore the
  * property explicitly instead of assuming it is absent.
  */

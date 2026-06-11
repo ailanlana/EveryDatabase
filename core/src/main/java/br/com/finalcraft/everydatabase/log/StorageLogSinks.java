@@ -11,7 +11,7 @@ import java.util.function.Consumer;
  * <ol>
  *   <li>If a host sink has been installed via {@link #installDefault(StorageLogSink)}, it takes priority.</li>
  *   <li>Otherwise, if SLF4J is available on the runtime classpath, events are routed to SLF4J
- *       loggers named {@code evernifecore.storage.<TOPIC>} (e.g. {@code evernifecore.storage.index}).
+ *       loggers named {@code everydatabase.<TOPIC>} (e.g. {@code everydatabase.index}).
  *       SLF4J is detected reflectively - no {@link NoClassDefFoundError} is thrown if absent.</li>
  *   <li>If neither is available, the sink is a no-op (silent).</li>
  * </ol>
