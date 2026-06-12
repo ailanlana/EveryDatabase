@@ -99,6 +99,11 @@ public class H2SqlStorage extends SqlStorage {
 
         @Override
         protected String sqlTypeFor(IndexHint hint) {
+            // H2 1.4 maps TEXT to CLOB and cannot index BLOB/CLOB columns, so string
+            // index columns must be VARCHAR (indexable at any length on both 1.x and 2.x).
+            // The storage_data column stays TEXT - it is never indexed.
+            if (hint.fieldType() == IndexHint.FieldType.STRING)
+                return "VARCHAR";
             // H2 does not support DATETIME; its native type is TIMESTAMP.
             if (hint.fieldType() == IndexHint.FieldType.TIMESTAMP)
                 return "TIMESTAMP(3)";

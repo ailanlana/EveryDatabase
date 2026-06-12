@@ -56,15 +56,17 @@ public final class EveryDatabaseDependencies {
             "org.yaml:snakeyaml:2.1",
     };
 
-    /** SQL pool stack shared by every SQL backend (HikariCP hard-requires slf4j-api at class-init). */
+    /** SQL pool stack shared by every SQL backend (HikariCP hard-requires slf4j-api at class-init).
+     *  HikariCP 4.x = last Java 8 line; 5.x is Java 11 bytecode. */
     private static final String[] SQL_POOL_STACK = {
-            "com.zaxxer:HikariCP:5.1.0",
+            "com.zaxxer:HikariCP:4.0.3",
             "org.slf4j:slf4j-api:1.7.36",
     };
 
-    /** The embedded H2 database engine (its JDBC driver is built in). */
+    /** The embedded H2 database engine (its JDBC driver is built in).
+     *  1.4.200 = last Java 8 release; 2.x is Java 11 bytecode with an incompatible file format. */
     private static final String[] H2_ENGINE = {
-            "com.h2database:h2:2.3.232",
+            "com.h2database:h2:1.4.200",
     };
 
     /** MongoDB synchronous driver and its flat transitive set. */

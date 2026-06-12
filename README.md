@@ -6,7 +6,7 @@
 
 A backend-agnostic persistence layer for the JVM. Write your data-access code **once** against a small, typed, `CompletableFuture`-based API — then run it on **MySQL/MariaDB, PostgreSQL, H2, MongoDB, local files, or in-memory** without changing a line. Migrate data between any two of them with a single builder.
 
-![Runtime](https://img.shields.io/badge/runtime-Java%208%2B%20(SQL%3A%2011%2B)-blue)
+![Runtime](https://img.shields.io/badge/runtime-Java%208%2B-blue)
 ![Build](https://img.shields.io/badge/build-JDK%2025-orange)
 ![Backends](https://img.shields.io/badge/backends-SQL%20%7C%20Mongo%20%7C%20File%20%7C%20Memory-green)
 ![Version](https://img.shields.io/badge/version-1.0.1-informational)
@@ -46,7 +46,7 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 - **🧩 Capabilities are interfaces, not flags.** Transactions, schema migrations and rich queries are *optional* interfaces a backend may implement — checked with `instanceof`, enforced by the compiler. No backend pretends to support something it can't.
 - **🗂️ Declarative indexes.** Annotate a field with `@Indexed` (or declare an `IndexHint`) and the backend creates a real secondary index — a SQL column + B-tree, a Mongo index, or an in-memory map.
 - **🔁 Built-in data transfer.** `StorageTransfer.builder()` copies entities between *any* two backends, read-only on the source, with batching, progress and verification.
-- **☕ Java 8 runtime.** Bytecode targets Java 8 while being authored in modern Java — see [Java version requirements](#java-version-requirements) for the per-backend floor (SQL backends need 11+).
+- **☕ Java 8 runtime.** Bytecode targets Java 8 while being authored in modern Java — and the default dependency set is Java-8-clean too, so **every backend runs on a Java 8 JVM** (see [Java version requirements](#java-version-requirements)).
 
 ---
 
@@ -82,7 +82,8 @@ dependencies {
     // MySQL + PostgreSQL JDBC drivers); override any version via normal dependency management:
     implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
 
-    // OR fat jar — the same set bundled & relocated, zero transitive deps, works anywhere:
+    // OR fat jar — bundled & relocated, zero transitive deps, works anywhere
+    // (one exception: the MySQL driver is not bundled — GPL; add it yourself if needed):
     //implementation 'br.com.finalcraft.everydatabase:everydatabase-standalone:1.0.1'
 
     // OR runtime download — your jar stays tiny, the same set is downloaded at runtime via Libby:
@@ -128,7 +129,7 @@ dependencies {
 
 ## Distribution flavors
 
-All three flavors expose the exact same API and carry the **same dependency set by default** — HikariCP, Jackson (`databind` + `yaml`), the MongoDB driver, H2, and the MySQL + PostgreSQL JDBC drivers. They only differ in **how that set reaches your classpath**.
+All three flavors expose the exact same API and carry the **same dependency set by default** — HikariCP, Jackson (`databind` + `yaml`), the MongoDB driver, H2, and the MySQL + PostgreSQL JDBC drivers. They only differ in **how that set reaches your classpath** (with one licensing-driven exception: the fat jar does not bundle the GPL MySQL driver — details in its section).
 
 ### `everydatabase-core` — recommended
 
@@ -139,10 +140,12 @@ The library with everything declared as a **normal POM dependency**: it works ou
 | `com.fasterxml.jackson.core:jackson-databind` | 2.15.4 | compile |
 | `org.mongodb:mongodb-driver-sync` | 4.11.2 | compile |
 | `com.fasterxml.jackson.dataformat:jackson-dataformat-yaml` | 2.15.4 | runtime |
-| `com.zaxxer:HikariCP` | 5.1.0 | runtime |
-| `com.h2database:h2` | 2.3.232 | runtime |
+| `com.zaxxer:HikariCP` (4.x = last Java 8 line; on 11+ feel free to override to 5.x) | 4.0.3 | runtime |
+| `com.h2database:h2` (1.4.200 = last Java 8 release — see note below before overriding) | 1.4.200 | runtime |
 | `com.mysql:mysql-connector-j` (protobuf excluded — only the removed X DevAPI needs it) | 9.4.0 | runtime |
 | `org.postgresql:postgresql` | 42.7.7 | runtime |
+
+> **H2 version note:** H2 1.x and 2.x use **incompatible database file formats** and slightly different SQL dialects. The default stays on 1.4.200 so Java 8 hosts work out of the box; if you run on Java 11+ and want H2 2.x, override it (`implementation 'com.h2database:h2:2.3.232'`) — but don't switch versions over an existing embedded-file database.
 
 ### `everydatabase-standalone` — fat jar
 
@@ -157,10 +160,15 @@ One self-contained jar: the library plus the whole default set, **shaded and rel
 | `com.fasterxml.jackson.annotation` | **not relocated** — kept at its original coordinates (see below) |
 | `org.yaml.snakeyaml` | `br.com.finalcraft.everydatabase.libs.snakeyaml` |
 | `org.h2` | `br.com.finalcraft.everydatabase.libs.h2` |
-| `com.mysql` | `br.com.finalcraft.everydatabase.libs.mysql` |
 | `org.postgresql` | `br.com.finalcraft.everydatabase.libs.postgresql` |
 
-- **JDBC drivers are bundled and discoverable.** The merged `META-INF/services/java.sql.Driver` lists all three relocated drivers (H2, MySQL, PostgreSQL), so `DriverManager` finds them normally. Because they are relocated, a host that ships its own driver version never class-clashes with the bundled ones.
+- **H2 and PostgreSQL drivers are bundled and discoverable.** The merged `META-INF/services/java.sql.Driver` lists both relocated drivers, so `DriverManager` finds them normally. Because they are relocated, a host that ships its own driver version never class-clashes with the bundled ones.
+- **The MySQL driver is *not* bundled — licensing, not size.** `mysql-connector-j` is GPLv2 (with the Universal FOSS Exception); redistributing it inside this jar would impose GPL terms on the artifact. Everything actually bundled is Apache-2.0 / BSD / MIT / MPL+EPL. Need MySQL/MariaDB with the standalone flavor? Add the driver yourself — it loads unrelocated and can't clash, since there is no bundled copy:
+
+  ```groovy
+  implementation 'br.com.finalcraft.everydatabase:everydatabase-standalone:1.0.1'
+  runtimeOnly    'com.mysql:mysql-connector-j:9.4.0'
+  ```
 - **`org.slf4j` is bundled but *not* relocated.** HikariCP hard-requires `org.slf4j.Logger` at class-init; on parent-first plugin classloaders (Bukkit/Paper) the host's SLF4J still wins whenever it ships one, so log auto-detection keeps routing to the host's logging. The bundled copy only provides linkage on hosts without SLF4J (logging falls back to a no-op).
 - **Jackson annotations just work.** `com.fasterxml.jackson.annotation` (`@JsonProperty`, `@JsonIgnore`, `@JsonCreator`, `@JsonFormat`, ...) is bundled **at its original coordinates**: annotations are matched by class identity, so the bundled mapper honors the real annotations on your entities — no relocated imports needed. Only the *advanced* annotations that live inside databind itself (`@JsonSerialize`, `@JsonDeserialize`) remain relocated, as do public overloads that accept Jackson types (e.g. `JacksonJsonCodec(Class, ObjectMapper)` expects the *relocated* `ObjectMapper` in this flavor).
 
@@ -702,6 +710,7 @@ Running `./gradlew :core:test` brings the containers up automatically (the Gradl
 ```bash
 ./gradlew :core:test                                   # everything
 ./gradlew :core:test -PskipStress                      # skip the 10k-record stress suites
+./gradlew :core:test -PnoDocker                        # no Docker at all (SQL/Mongo suites self-skip)
 ./gradlew :core:test --tests "*MariaDbStorageTest"     # one class
 ./gradlew :core:test --tests "*MariaDbStorageTest.inTransaction_commit_savesAreVisible"
 ```
@@ -738,32 +747,33 @@ EveryDatabase/
 
 ### Java version requirements
 
-The **library itself is Java 8 bytecode** (no Java 9+ APIs at runtime) — but two of the default backend libraries dropped Java 8 upstream, so the *effective* floor depends on which backend you use. Classes load lazily, so an unused backend never raises the bar: a Java 8 host using only Mongo/file/memory never touches HikariCP or H2 classes, in **any** flavor (including the fat jar).
+**Everything runs on Java 8** — the library is compiled with `--release 8`, and the default dependency versions were deliberately chosen as the **last Java-8-compatible lines** of each library:
 
-| What you use | Minimum Java | Why |
-|---|:---:|---|
-| EveryDatabase classes themselves | **8** | compiled with `--release 8` |
-| MongoDB backend | **8** | `mongodb-driver-sync` 4.11 is Java 8 |
-| Local files / In-memory backends | **8** | no external deps |
-| Jackson codecs (JSON/YAML) | **8** | Jackson 2.15 is Java 8 |
-| **Any SQL backend** (MySQL/MariaDB, PostgreSQL, H2) | **11** ⚠️ | HikariCP 5.x is Java 11 bytecode |
-| **H2 backend** specifically | **11** ⚠️ | H2 2.x is Java 11 bytecode (on top of HikariCP) |
-| MySQL/PostgreSQL JDBC drivers (default versions) | 8 | `mysql-connector-j` 9.4 and `postgresql` 42.7 are Java 8 |
+| Component | Default version | Minimum Java |
+|---|---|:---:|
+| EveryDatabase classes themselves | — | **8** (compiled with `--release 8`) |
+| Jackson codecs (JSON/YAML) | 2.15.4 | 8 |
+| MongoDB backend (`mongodb-driver-sync`) | 4.11.2 | 8 |
+| SQL pooling (`HikariCP`) | 4.0.3 — last Java 8 line | 8 |
+| H2 backend (`com.h2database:h2`) | 1.4.200 — last Java 8 release | 8 |
+| MySQL / PostgreSQL JDBC drivers | 9.4.0 / 42.7.7 | 8 |
+| Local files / In-memory backends | (no external deps) | 8 |
 
-**SQL on a Java 8 JVM is currently not supported out of the box** in any flavor (standalone and libby ship/download HikariCP 5.x and H2 2.x with no version control, and core defaults to them). If you are stuck on Java 8 and need SQL, the proposed path is the `core` flavor with a forced downgrade of the pool — the rest of the stack is already Java-8-clean:
+Running on **Java 11+** and want the newer majors? With the `core` flavor just override them — the library's code paths work with both lines:
 
 ```groovy
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
-implementation 'com.zaxxer:HikariCP:4.0.3!!'   // last HikariCP line built for Java 8
+implementation 'com.zaxxer:HikariCP:5.1.0'     // Java 11+ (5.x line)
+implementation 'com.h2database:h2:2.3.232'     // Java 11+ (2.x line) — read the warning below!
 ```
 
-> ⚠️ HikariCP 4.0.3 exposes the same API surface the library uses, but this combination is **not covered by the test suite** — treat it as experimental and test your deployment. H2 on Java 8 stays unsupported either way (H2 1.x has a different storage format and SQL dialect); use MySQL/MariaDB/PostgreSQL, or a non-SQL backend, on Java 8 hosts. A dedicated `everydatabase-standalone-java8` flavor (bundling HikariCP 4.x, no H2) is a possible future addition if there's demand.
+> ⚠️ **H2 1.x ↔ 2.x are not interchangeable on disk:** the database **file formats are incompatible** and the SQL dialects differ slightly. Pick one before going to production and never swap the major version over an existing embedded-file database (export/import instead). In-memory H2 (`jdbc:h2:mem:`) has no such concern.
 
 ### Other notes
 
 - **Build:** authored in Java 17 syntax and compiled to Java 8 via [Jabel](https://github.com/bsideup/jabel); the Gradle toolchain is **JDK 25** (Gradle 9.5 launches on JDK 25 directly).
 - **Concurrency:** `StorageExecutors` uses virtual threads on Java 21+, falling back to a bounded daemon thread pool on older JVMs.
-- **Dependencies & drivers:** every flavor ships the full backend set by default — HikariCP, Jackson, Mongo driver, H2, and the MySQL + PostgreSQL JDBC drivers. With `core` you override versions via normal dependency management; `standalone` bundles everything relocated (drivers included, discoverable through the merged `java.sql.Driver` service file); `libby` downloads the same set at runtime — see [Distribution flavors](#distribution-flavors).
+- **Dependencies & drivers:** every flavor ships the full backend set by default — HikariCP, Jackson, Mongo driver, H2, and the MySQL + PostgreSQL JDBC drivers. With `core` you override versions via normal dependency management; `standalone` bundles everything relocated **except the MySQL driver** (GPL — add it yourself when needed); `libby` downloads the full set at runtime — see [Distribution flavors](#distribution-flavors).
+- **Licensing of bundled code:** everything redistributed inside the standalone fat jar is permissively licensed (Apache-2.0: HikariCP, Jackson, Mongo driver, snakeyaml · BSD-2: PostgreSQL driver · MPL-2.0/EPL-1.0: H2 · MIT: slf4j-api). `mysql-connector-j` (GPLv2 + Universal FOSS Exception) is never redistributed by this project — it is only referenced as POM metadata (`core`) or downloaded from Maven Central on the end user's machine (`libby`).
 - **Logging:** SLF4J is **optional** — `slf4j-api` is a compile-only dependency, detected reflectively at runtime. Without it on the classpath logging quietly no-ops; no `NoClassDefFoundError`, no mandatory logging framework. (The standalone flavor bundles an unrelocated `slf4j-api` for linkage only — the host's SLF4J still wins when present.)
 - **Serialisation:** entities must be Jackson-serialisable (a no-arg constructor plus accessors, or appropriate Jackson annotations).
 

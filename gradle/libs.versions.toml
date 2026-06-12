@@ -1,8 +1,14 @@
 [versions]
 jabel = "0.4.2"
-hikaricp = "5.1.0"
+# HikariCP 4.x is the last line built for Java 8 (5.x is Java 11 bytecode).
+# Kept at 4.0.3 so every backend runs on a Java 8 JVM; consumers on 11+ may
+# override to 5.x via normal dependency management.
+hikaricp = "4.0.3"
 mongodb = "4.11.2"
-h2 = "2.3.232"
+# H2 1.4.200 is the last release built for Java 8 (2.x is Java 11 bytecode).
+# NOTE: 1.x and 2.x database FILE FORMATS are incompatible - bumping this
+# major version would break existing embedded-file deployments.
+h2 = "1.4.200"
 jackson = "2.15.4"
 slf4j = "1.7.36"
 slf4j-simple = "2.0.17"

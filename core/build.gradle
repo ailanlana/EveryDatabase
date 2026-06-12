@@ -86,8 +86,9 @@ dependencies {
     testRuntimeOnly libs.junit.jupiter.engine
 
     // SLF4J simple binding for the tests.
-    // Without it, HikariCP 5.x pulls slf4j-api 2.0.17 transitively but with no provider,
-    // and StorageLog's auto() sink falls back to NOP - no logs appear during the tests.
+    // Without a provider on the classpath StorageLog's auto() sink falls back to NOP
+    // and no logs appear during the tests. (slf4j-simple brings its matching slf4j-api
+    // transitively; HikariCP's older 1.7.x api request resolves up to it - compatible.)
     testRuntimeOnly libs.slf4j.simple
 
     // Random data generation for the stress tests
@@ -107,7 +108,13 @@ dockerCompose {
     captureContainersOutput = project.hasProperty('docker.logs')
 }
 
-dockerCompose.isRequiredBy(test)
+// -PnoDocker skips the docker-compose wiring entirely (SQL/Mongo suites self-skip,
+// the embedded H2/LocalFile/InMemory suites still run). The old `-x :core:composeUp`
+// shortcut broke under Gradle 9 + plugin 0.17.x: the test task eagerly queries
+// composeUp's providers, which fails when the task is excluded.
+if (!project.hasProperty('noDocker')) {
+    dockerCompose.isRequiredBy(test)
+}
 
 publishing {
     publications {
