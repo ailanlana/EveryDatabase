@@ -1,0 +1,42 @@
+// Folder is 'manager'; the published artifact is 'everydatabase-manager'
+// (see specs/SPEC_refs_and_managers.md).
+//
+// A thin façade module that sits IN FRONT of :core: typed references (Ref),
+// a per-type resolver registry (Refs) and caching managers (CachingManager).
+// It only depends on the public :core API - no backend code lives here.
+base {
+    archivesName = 'everydatabase-manager'
+}
+
+// Toolchain (Java 25) and the dual-target compileJava override (Java 17 syntax ->
+// Java 8 bytecode via Jabel) are configured centrally in the root build.gradle,
+// which lists :manager alongside :core and :libby.
+
+dependencies {
+    // api, not implementation: Ref/CachingManager expose :core types (Storage,
+    // Repository, EntityDescriptor) in their public signatures, and the Jackson
+    // RefModule extends com.fasterxml.jackson types - consumers compile against both.
+    api project(':core')
+    api libs.jackson.databind
+
+    // JUnit 5 (compiles/runs on the Java 25 toolchain, like :core's tests)
+    testImplementation libs.junit.jupiter.api
+    testRuntimeOnly libs.junit.jupiter.engine
+
+    // SLF4J simple binding so :core's StorageLog has somewhere to write during tests
+    // (without a provider its auto() sink falls back to NOP - harmless, just quiet).
+    testRuntimeOnly libs.slf4j.simple
+}
+
+test {
+    useJUnitPlatform()
+}
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            artifactId = 'everydatabase-manager'
+            from components.java
+        }
+    }
+}

@@ -58,6 +58,21 @@ subprojects {
 
     // Publications are defined per module (each sets its own everydatabase-* artifactId):
     // core and libby publish 'components.java'; standalone publishes the shadow jar.
+    publishing {
+        repositories {
+            maven {
+                name = "PetrusRepo"
+                url = "https://maven.petrus.dev/public"
+                credentials {
+                    username = System.env.PETRUSMAVEN_ACTOR
+                    password = System.env.PETRUSMAVEN_TOKEN
+                }
+                authentication {
+                    basic(BasicAuthentication)
+                }
+            }
+        }
+    }
 }
 
 // ======================================================================
@@ -74,7 +89,7 @@ subprojects {
 //  follow the main toolchain to 25. Everything else (Gradle itself, test
 //  compilation, test execution) runs on Java 25.
 // ======================================================================
-configure([project(':core'), project(':libby')]) {
+configure([project(':core'), project(':libby'), project(':manager')]) {
     dependencies {
         annotationProcessor libs.jabel
         compileOnly libs.jabel
