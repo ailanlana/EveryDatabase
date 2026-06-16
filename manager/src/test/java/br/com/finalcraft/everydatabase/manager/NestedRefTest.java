@@ -4,6 +4,8 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Storages;
 import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
+import br.com.finalcraft.everydatabase.manager.testdata.Guild;
+import br.com.finalcraft.everydatabase.manager.testdata.GuildBattleData;
 import br.com.finalcraft.everydatabase.manager.jackson.RefCodecs;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import org.junit.jupiter.api.AfterEach;
@@ -37,12 +39,13 @@ class NestedRefTest {
     void guild_resolves_its_nested_battle_data_through_a_separate_manager() {
         EntityDescriptor<UUID, Guild> guildDesc = EntityDescriptor.builder(UUID.class, Guild.class)
                 .collection("guilds")
-                .keyExtractor(g -> g.id)
+                .keyExtractor(Guild::getId)
                 .codec(RefCodecs.json(Guild.class))                  // Guild has a Ref field
                 .build();
+
         EntityDescriptor<UUID, GuildBattleData> battleDesc = EntityDescriptor.builder(UUID.class, GuildBattleData.class)
                 .collection("guild_battle")
-                .keyExtractor(b -> b.id)
+                .keyExtractor(GuildBattleData::getId)
                 .codec(new JacksonJsonCodec<>(GuildBattleData.class))
                 .build();
 
@@ -63,10 +66,10 @@ class NestedRefTest {
 
         // Load the guild, then resolve the nested ref through GuildBattleData's own manager.
         Guild loaded = guilds.resolve(gid).join().orElseThrow(AssertionError::new);
-        assertTrue(loaded.battleData.isPresent());
-        assertTrue(loaded.battleData.policyOverride().isPresent());
+        assertTrue(loaded.getBattleData().isPresent());
+        assertTrue(loaded.getBattleData().policyOverride().isPresent());
 
-        GuildBattleData bd = loaded.battleData.resolve().join().orElseThrow(AssertionError::new);
-        assertEquals(42, bd.totalBattles);
+        GuildBattleData bd = loaded.getBattleData().resolve().join().orElseThrow(AssertionError::new);
+        assertEquals(42, bd.getTotalBattles());
     }
 }

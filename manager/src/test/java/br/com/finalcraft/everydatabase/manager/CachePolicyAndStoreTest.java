@@ -130,4 +130,59 @@ class CachePolicyAndStoreTest {
 
         assertTrue(entry.isStale());
     }
+
+    @Test
+    void publish_is_guarded_by_a_monotonic_stamp() {
+        CacheEntry<String> cell = new CacheEntry<>("v1");        // stamp 0
+        assertTrue(cell.publish("v2", 2L));                      // newer stamp applies
+        assertEquals("v2", cell.getValue());
+
+        assertFalse(cell.publish("v1", 1L));                     // older stamp is rejected...
+        assertEquals("v2", cell.getValue(), "an older reload must not regress a newer write");
+
+        assertTrue(cell.publish("v3", 2L));                      // ...equal stamp still applies (>=)
+        assertEquals("v3", cell.getValue());
+    }
+
+    // ---- tombstone hardening (delete vs a concurrent in-flight reload) -----------
+
+    @Test
+    void installColdMiss_keeps_the_first_live_instance() {
+        LruCacheStore<String, String> store = new LruCacheStore<>(0);
+        CacheEntry<String> first = store.installColdMiss("k", "first", 1L);
+        CacheEntry<String> second = store.installColdMiss("k", "second", 2L);
+        assertSame(first, second, "concurrent cold misses converge on the first instance");
+        assertEquals("first", second.getValue());
+    }
+
+    @Test
+    void installColdMiss_respects_a_newer_tombstone() {
+        LruCacheStore<String, String> store = new LruCacheStore<>(0);
+        store.tombstone("k", 10L);                                       // deleted at stamp 10
+        CacheEntry<String> cell = store.installColdMiss("k", "v", 5L);   // reload issued earlier (5 < 10)
+        assertTrue(cell.isDeleted(), "an older reload must not resurrect a newer delete");
+    }
+
+    @Test
+    void installColdMiss_resurrects_an_older_tombstone() {
+        LruCacheStore<String, String> store = new LruCacheStore<>(0);
+        store.tombstone("k", 5L);
+        CacheEntry<String> cell = store.installColdMiss("k", "v", 10L);  // reload issued later (10 > 5)
+        assertFalse(cell.isDeleted());
+        assertEquals("v", cell.getValue());
+    }
+
+    @Test
+    void tombstone_is_guarded_by_stamp() {
+        LruCacheStore<String, String> store = new LruCacheStore<>(0);
+        CacheEntry<String> cell = new CacheEntry<>("v");
+        store.put("k", cell);
+        cell.publish("v2", 5L);                  // a write at stamp 5
+
+        store.tombstone("k", 3L);                // older delete -> rejected
+        assertFalse(cell.isDeleted(), "an older delete must not tombstone a newer write");
+
+        store.tombstone("k", 6L);                // newer delete -> applies
+        assertTrue(cell.isDeleted());
+    }
 }

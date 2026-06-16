@@ -26,9 +26,10 @@ import java.util.function.Predicate;
  * serves nothing - so a hot read loop over non-fresh keys can pin never-served entries.
  * Acceptable for the small hot sets this layer targets.
  *
- * <p>The compound operations ({@link #installIfAbsent}, {@link #replaceIfSame}, {@link #markStale})
- * exist so the manager keeps the identity map stable under concurrency: publishing a freshly
- * loaded value is one atomic step, not a racy get-then-put.
+ * <p>The compound operations ({@link #installIfAbsent}, {@link #installColdMiss}, {@link #tombstone},
+ * {@link #markStale}) exist so the manager keeps the identity map stable under concurrency:
+ * publishing a freshly loaded value - or a delete tombstone - is one atomic, stamp-ordered step,
+ * not a racy get-then-put.
  *
  * @param <K> the key type
  * @param <V> the cached value type
@@ -44,7 +45,11 @@ final class LruCacheStore<K, V> {
             this.map = new LinkedHashMap<K, CacheEntry<V>>(16, 0.75f, true) {
                 @Override
                 protected boolean removeEldestEntry(Map.Entry<K, CacheEntry<V>> eldest) {
-                    return size() > bound;
+                    if (size() > bound) {
+                        eldest.getValue().markEvicted();   // tell any holder to re-resolve
+                        return true;
+                    }
+                    return false;
                 }
             };
         } else {
@@ -66,7 +71,10 @@ final class LruCacheStore<K, V> {
 
     void remove(K key) {
         synchronized (lock) {
-            map.remove(key);
+            CacheEntry<V> removed = map.remove(key);
+            if (removed != null) {
+                removed.markEvicted();
+            }
         }
     }
 
@@ -83,6 +91,50 @@ final class LruCacheStore<K, V> {
             }
             map.put(key, candidate);
             return candidate;
+        }
+    }
+
+    /**
+     * Cold-miss publish: install a fresh live cell when absent (so concurrent cold misses converge
+     * on the first instance), but never resurrect a tombstone whose delete is newer than this read.
+     * An older tombstone (a delete issued before this read started) is resurrected with {@code value}.
+     *
+     * @return the cell now held - a live cell, or the tombstone when a newer delete wins (the caller
+     *         treats a returned tombstone as "absent")
+     */
+    CacheEntry<V> installColdMiss(K key, V value, long stamp) {
+        synchronized (lock) {
+            CacheEntry<V> cell = map.get(key);
+            if (cell == null) {
+                CacheEntry<V> fresh = new CacheEntry<>(value, stamp);
+                map.put(key, fresh);
+                return fresh;
+            }
+            if (!cell.isDeleted()) {
+                return cell;                 // live -> keep the first instance (convergence)
+            }
+            if (stamp > cell.stamp()) {
+                cell.publish(value, stamp);  // tombstone older than this read -> resurrect
+            }
+            return cell;
+        }
+    }
+
+    /**
+     * Atomically turns the key's cell into a tombstone (deleted), creating one if absent. The
+     * monotonic {@code stamp} guard means a slower delete never overrides a newer write, and the
+     * tombstone blocks a slower in-flight reload from re-installing the just-deleted entity.
+     */
+    void tombstone(K key, long stamp) {
+        synchronized (lock) {
+            CacheEntry<V> cell = map.get(key);
+            if (cell == null) {
+                cell = new CacheEntry<>(null, stamp);
+                cell.tombstone(stamp);
+                map.put(key, cell);
+            } else {
+                cell.tombstone(stamp);
+            }
         }
     }
 
@@ -117,7 +169,9 @@ final class LruCacheStore<K, V> {
             int removed = 0;
             Iterator<Map.Entry<K, CacheEntry<V>>> it = map.entrySet().iterator();
             while (it.hasNext()) {
-                if (shouldEvict.test(it.next().getValue())) {
+                CacheEntry<V> entry = it.next().getValue();
+                if (shouldEvict.test(entry)) {
+                    entry.markEvicted();
                     it.remove();
                     removed++;
                 }
@@ -128,6 +182,9 @@ final class LruCacheStore<K, V> {
 
     void clear() {
         synchronized (lock) {
+            for (CacheEntry<V> entry : map.values()) {
+                entry.markEvicted();
+            }
             map.clear();
         }
     }
@@ -135,6 +192,19 @@ final class LruCacheStore<K, V> {
     int size() {
         synchronized (lock) {
             return map.size();
+        }
+    }
+
+    /** Number of live (non-tombstone) entries currently cached. */
+    int liveCount() {
+        synchronized (lock) {
+            int n = 0;
+            for (CacheEntry<V> entry : map.values()) {
+                if (!entry.isDeleted()) {
+                    n++;
+                }
+            }
+            return n;
         }
     }
 

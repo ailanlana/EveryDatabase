@@ -2,6 +2,7 @@ package br.com.finalcraft.everydatabase.manager;
 
 import br.com.finalcraft.everydatabase.manager.cache.CacheEntry;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
+import br.com.finalcraft.everydatabase.manager.testdata.*;
 import br.com.finalcraft.everydatabase.manager.jackson.RefCodecs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -41,11 +42,11 @@ class RefSerializationTest {
 
         Player back = mapper.readValue(mapper.writeValueAsString(player), Player.class);
 
-        assertNotNull(back.guild);
-        assertTrue(back.guild.isPresent());
-        assertEquals(guildId, back.guild.key());
-        assertEquals(Guild.class, back.guild.type());
-        assertFalse(back.guild.policyOverride().isPresent(), "no override declared");
+        assertNotNull(back.getGuild());
+        assertTrue(back.getGuild().isPresent());
+        assertEquals(guildId, back.getGuild().key());
+        assertEquals(Guild.class, back.getGuild().type());
+        assertFalse(back.getGuild().policyOverride().isPresent(), "no override declared");
     }
 
     @Test
@@ -54,8 +55,8 @@ class RefSerializationTest {
 
         Player back = mapper.readValue(mapper.writeValueAsString(player), Player.class);
 
-        assertNotNull(back.guild, "a JSON null becomes an empty Ref, never a bare null");
-        assertFalse(back.guild.isPresent());
+        assertNotNull(back.getGuild(), "a JSON null becomes an empty Ref, never a bare null");
+        assertFalse(back.getGuild().isPresent());
     }
 
     @Test
@@ -65,8 +66,8 @@ class RefSerializationTest {
 
         PlayerNoCache back = mapper.readValue(mapper.writeValueAsString(player), PlayerNoCache.class);
 
-        assertTrue(back.guild.policyOverride().isPresent());
-        CachePolicy override = back.guild.policyOverride().get();
+        assertTrue(back.getGuild().policyOverride().isPresent());
+        CachePolicy override = back.getGuild().policyOverride().get();
         // noCache semantics: nothing is ever fresh.
         assertFalse(override.isFresh(new CacheEntry<>(new Guild(guildId, "x"))));
     }
@@ -78,8 +79,8 @@ class RefSerializationTest {
 
         PlayerTtl back = mapper.readValue(mapper.writeValueAsString(player), PlayerTtl.class);
 
-        assertTrue(back.guild.policyOverride().isPresent());
-        CachePolicy override = back.guild.policyOverride().get();
+        assertTrue(back.getGuild().policyOverride().isPresent());
+        CachePolicy override = back.getGuild().policyOverride().get();
         Guild g = new Guild(guildId, "x");
         assertTrue(override.isFresh(new CacheEntry<>(g, Instant.now())), "within 180s is fresh");
         assertFalse(override.isFresh(new CacheEntry<>(g, Instant.now().minusSeconds(600))), "older than 180s is stale");
@@ -94,10 +95,10 @@ class RefSerializationTest {
 
         Squad back = mapper.readValue(mapper.writeValueAsString(squad), Squad.class);
 
-        assertEquals(2, back.members.size());
-        assertTrue(back.members.get(0).isPresent());
-        assertEquals(g1, back.members.get(0).key());
-        assertEquals(Guild.class, back.members.get(0).type());
-        assertEquals(g2, back.members.get(1).key());
+        assertEquals(2, back.getMembers().size());
+        assertTrue(back.getMembers().get(0).isPresent());
+        assertEquals(g1, back.getMembers().get(0).key());
+        assertEquals(Guild.class, back.getMembers().get(0).type());
+        assertEquals(g2, back.getMembers().get(1).key());
     }
 }

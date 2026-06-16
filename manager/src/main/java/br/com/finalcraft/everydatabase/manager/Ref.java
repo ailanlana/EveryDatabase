@@ -1,5 +1,6 @@
 package br.com.finalcraft.everydatabase.manager;
 
+import br.com.finalcraft.everydatabase.manager.cache.CacheEntry;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
 
 import java.time.Duration;
@@ -36,6 +37,10 @@ public final class Ref<K, V> {
     private final Class<V> type;
     /** Nullable: when null, the manager's default policy is used. */
     private final CachePolicy policyOverride;
+    /** Memoized live cache cell (runtime only; never serialized). Enables lock-free reads. */
+    private transient volatile CacheEntry<V> cell;
+    /** Memoized effective policy: the override, or the manager default once the resolver is known. */
+    private transient volatile CachePolicy effectivePolicy;
 
     private Ref(K key, Class<V> type, CachePolicy policyOverride) {
         this.type = Objects.requireNonNull(type, "type");
@@ -109,8 +114,15 @@ public final class Ref<K, V> {
         if (key == null) {
             return Optional.empty();
         }
+        CacheEntry<V> memo = cell;
+        CachePolicy eff = effectivePolicy;
+        if (memo != null && !memo.isEvicted() && !memo.isDeleted() && eff != null && eff.isFresh(memo)) {
+            return Optional.of(memo.getValue());           // lock-free fast path
+        }
         RefResolver<K, V> resolver = resolver();
-        return policyOverride != null ? resolver.peek(key, policyOverride) : resolver.peek(key);
+        CacheEntry<V> got = resolver.peekCell(key, effectivePolicy(resolver));
+        this.cell = got;
+        return got == null ? Optional.empty() : Optional.of(got.getValue());
     }
 
     /**
@@ -121,12 +133,20 @@ public final class Ref<K, V> {
         if (key == null) {
             return CompletableFuture.completedFuture(Optional.empty());
         }
+        CacheEntry<V> memo = cell;
+        CachePolicy eff = effectivePolicy;
+        if (memo != null && !memo.isEvicted() && !memo.isDeleted() && eff != null && eff.isFresh(memo)) {
+            return CompletableFuture.completedFuture(Optional.of(memo.getValue())); // lock-free fast path
+        }
         RefResolver<K, V> resolver = Refs.resolver(type);
         if (resolver == null) {
             // Async contract: surface a wiring error through the future, not a synchronous throw.
             return failedFuture(noResolver());
         }
-        return policyOverride != null ? resolver.resolve(key, policyOverride) : resolver.resolve(key);
+        return resolver.resolveCell(key, effectivePolicy(resolver)).thenApply(got -> {
+            this.cell = got;
+            return got == null ? Optional.<V>empty() : Optional.of(got.getValue());
+        });
     }
 
     /**
@@ -144,6 +164,16 @@ public final class Ref<K, V> {
             throw noResolver();
         }
         return resolver;
+    }
+
+    /** The effective freshness policy for this reference, memoized once the resolver is known. */
+    private CachePolicy effectivePolicy(RefResolver<K, V> resolver) {
+        CachePolicy eff = effectivePolicy;
+        if (eff == null) {
+            eff = policyOverride != null ? policyOverride : resolver.defaultPolicy();
+            effectivePolicy = eff;
+        }
+        return eff;
     }
 
     private IllegalStateException noResolver() {

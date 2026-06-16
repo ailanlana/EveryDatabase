@@ -3,6 +3,7 @@ package br.com.finalcraft.everydatabase.manager;
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.manager.cache.CacheOptions;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
+import br.com.finalcraft.everydatabase.manager.testdata.Guild;
 import br.com.finalcraft.everydatabase.manager.jackson.RefCodecs;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import br.com.finalcraft.everydatabase.Storages;
@@ -46,7 +47,7 @@ class CachingManagerTest {
         storage.init().join();
         guildDescriptor = EntityDescriptor.builder(UUID.class, Guild.class)
                 .collection("guilds")
-                .keyExtractor(g -> g.id)
+                .keyExtractor(g -> g.getId())
                 .codec(RefCodecs.json(Guild.class))   // Guild carries a Ref field (battleData)
                 .build();
     }
@@ -80,7 +81,7 @@ class CachingManagerTest {
 
         Optional<Guild> resolved = mgr.resolve(id).join();
         assertTrue(resolved.isPresent());
-        assertEquals("Knights", resolved.get().name);
+        assertEquals("Knights", resolved.get().getName());
         assertEquals(1, mgr.cachedSize());
 
         // The identity map: peek returns the same cached instance the resolve produced.
@@ -95,9 +96,9 @@ class CachingManagerTest {
         mgr.saveAndCache(guild).join();
 
         // Cached without any read, and the cached instance is exactly what we saved.
-        assertSame(guild, mgr.peek(guild.id).get());
+        assertSame(guild, mgr.peek(guild.getId()).get());
         // ...and it is actually in the backend.
-        assertTrue(mgr.repository().find(guild.id).join().isPresent());
+        assertTrue(mgr.repository().find(guild.getId()).join().isPresent());
     }
 
     @Test
@@ -110,7 +111,7 @@ class CachingManagerTest {
 
         List<Guild> all = mgr.getAll(Arrays.asList(a, b, c)).join();
 
-        Set<UUID> ids = all.stream().map(g -> g.id).collect(Collectors.toSet());
+        Set<UUID> ids = all.stream().map(g -> g.getId()).collect(Collectors.toSet());
         assertEquals(new HashSet<>(Arrays.asList(a, b, c)), ids);
         assertEquals(3, mgr.cachedSize());
     }
@@ -155,6 +156,63 @@ class CachingManagerTest {
     }
 
     @Test
+    void deleteAndEvict_removes_from_backend_and_cache() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Doomed");
+        mgr.resolve(id).join();                        // now cached
+        assertEquals(1, mgr.cachedSize());
+
+        boolean existed = mgr.deleteAndEvict(id).join();
+
+        assertTrue(existed);
+        assertEquals(0, mgr.cachedSize(), "evicted from cache");
+        assertFalse(mgr.peek(id).isPresent());
+        assertFalse(mgr.repository().find(id).join().isPresent(), "deleted from the backend");
+    }
+
+    @Test
+    void deleteAndEvict_is_safe_when_the_key_is_not_cached() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Doomed");            // in the backend, never cached
+        assertEquals(0, mgr.cachedSize());
+
+        boolean existed = mgr.deleteAndEvict(id).join();
+
+        assertTrue(existed);
+        assertFalse(mgr.repository().find(id).join().isPresent());
+        assertEquals(0, mgr.cachedSize());
+    }
+
+    @Test
+    void deleteAndEvict_makes_a_memoized_ref_resolve_empty() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Doomed");
+        Ref<UUID, Guild> ref = Ref.of(id, Guild.class);
+        assertEquals("Doomed", ref.resolve().join().get().getName());   // memoizes the cell
+
+        mgr.deleteAndEvict(id).join();
+
+        assertFalse(ref.resolve().join().isPresent(), "the handle re-resolves and finds it gone");
+    }
+
+    @Test
+    void saveAndCache_after_deleteAndEvict_recreates_the_entity() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Old");
+        mgr.resolve(id).join();
+
+        mgr.deleteAndEvict(id).join();
+        assertFalse(mgr.peek(id).isPresent());
+        assertFalse(mgr.resolve(id).join().isPresent(), "gone from the backend");
+
+        // A later save resurrects the tombstone (it carries a newer stamp than the delete).
+        mgr.saveAndCache(new Guild(id, "New")).join();
+        assertEquals("New", mgr.resolve(id).join().get().getName());
+        assertTrue(mgr.peek(id).isPresent());
+        assertEquals(1, mgr.cachedSize(), "the resurrected entity counts as live again");
+    }
+
+    @Test
     void purgeExpired_drops_entries_the_policy_no_longer_considers_fresh() {
         CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
         UUID id = seedGuild(mgr, "Stale");
@@ -166,6 +224,37 @@ class CachingManagerTest {
 
         assertEquals(1, purged);
         assertEquals(0, mgr.cachedSize(), "stale entries are released so the GC can reclaim them");
+    }
+
+    @Test
+    void a_memoized_ref_sees_writes_via_in_place_cell_update() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = UUID.randomUUID();
+        mgr.saveAndCache(new Guild(id, "Before")).join();
+
+        Ref<UUID, Guild> ref = Ref.of(id, Guild.class);
+        assertEquals("Before", ref.resolve().join().get().getName());   // memoizes the live cell
+
+        // A later write updates the SAME cell in place...
+        mgr.saveAndCache(new Guild(id, "After")).join();
+
+        // ...so the memoized handle observes it without re-resolving.
+        assertEquals("After", ref.peek().get().getName());
+    }
+
+    @Test
+    void a_memoized_ref_re_resolves_after_its_cell_is_evicted() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "X");
+        Ref<UUID, Guild> ref = Ref.of(id, Guild.class);
+        assertEquals("X", ref.resolve().join().get().getName());        // memoizes the live cell
+
+        mgr.evict(id);                                             // marks the cell evicted
+
+        // The fast path sees the evicted cell and falls back: peek (cache-only) misses...
+        assertFalse(ref.peek().isPresent());
+        // ...and resolve reloads from the backend.
+        assertEquals("X", ref.resolve().join().get().getName());
     }
 
     @Test
@@ -252,5 +341,43 @@ class CachingManagerTest {
         assertTrue(future.isCompletedExceptionally(), "wiring errors must surface via the future, not a sync throw");
         CompletionException ex = assertThrows(CompletionException.class, future::join);
         assertTrue(ex.getCause() instanceof IllegalStateException);
+    }
+
+    @Test
+    void concurrent_resolve_save_invalidate_stay_consistent() throws Exception {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Init");
+        int threads = 12;
+        int rounds = 50;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            List<Future<?>> futures = new java.util.ArrayList<>();
+            for (int t = 0; t < threads; t++) {
+                final int tid = t;
+                futures.add(pool.submit(() -> {
+                    for (int r = 0; r < rounds; r++) {
+                        switch (r % 3) {
+                            case 0:
+                                mgr.resolve(id).join();
+                                break;
+                            case 1:
+                                mgr.saveAndCache(new Guild(id, "v" + tid + "_" + r)).join();
+                                break;
+                            default:
+                                mgr.invalidate(id);
+                        }
+                    }
+                    return null;
+                }));
+            }
+            for (Future<?> f : futures) {
+                f.get();   // surfaces any race / crash from a worker
+            }
+            // No deadlock; the key still resolves, and the cache holds at most this one key.
+            assertTrue(mgr.resolve(id).join().isPresent());
+            assertTrue(mgr.cachedSize() <= 1);
+        } finally {
+            pool.shutdownNow();
+        }
     }
 }

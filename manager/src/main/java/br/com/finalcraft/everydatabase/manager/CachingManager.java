@@ -13,8 +13,8 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 /**
@@ -31,8 +31,14 @@ import java.util.function.Function;
  * reference); capacity is the LRU bound from {@link CacheOptions#maxSize()}. The two are
  * separate by design - see {@code CacheOptions}.
  *
+ * <h3>Cells &amp; handles</h3>
+ * Each key maps to a stable {@link CacheEntry} <b>cell</b>; writes and reloads update that cell
+ * <b>in place</b> (swap the value, guarded by a monotonic stamp). A {@link Ref} memoizes the cell,
+ * so once resolved its reads are lock-free and it always observes the latest value. On eviction the
+ * cell is flagged so a holder re-resolves on next access.
+ *
  * <h3>Invalidation</h3>
- * {@link #save(Object)} is write-through (the cache entry is replaced with the just-saved value)
+ * {@link #saveAndCache(Object)} is write-through (the cell is updated in place with the saved value)
  * and auto-evicts on an {@link OptimisticLockException} (a stale cached write means the cache is
  * behind the backend). Cross-process writes are invisible here - bound their staleness with a
  * TTL policy and/or wire an external signal to {@link #invalidate(Object)}/{@link #evict(Object)}.
@@ -47,6 +53,8 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     protected final Function<V, K> keyOf;
     protected final CacheOptions options;
     private final LruCacheStore<K, V> store;
+    /** Monotonic source for publication stamps (orders writes/reloads so none regress a newer one). */
+    private final AtomicLong stampGen = new AtomicLong();
 
     /** Creates a manager with the given options and registers it in {@link Refs}. */
     public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CacheOptions options) {
@@ -63,63 +71,65 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         this(descriptor, storage, CacheOptions.of(policy));
     }
 
+    public Repository<K, V> getRepository() {
+        return repository;
+    }
+
     // ------------------------------------------------------------------
     //  RefResolver
     // ------------------------------------------------------------------
 
     @Override
-    public Optional<V> peek(K key) {
-        return peek(key, options.policy());
+    public CachePolicy defaultPolicy() {
+        return options.policy();
     }
 
     @Override
-    public Optional<V> peek(K key, CachePolicy policy) {
-        CacheEntry<V> entry = store.get(key);
-        return (entry != null && policy.isFresh(entry)) ? Optional.of(entry.getValue()) : Optional.empty();
+    public CacheEntry<V> peekCell(K key, CachePolicy policy) {
+        CacheEntry<V> cell = store.get(key);
+        return serveable(cell, policy) ? cell : null;
     }
 
     @Override
-    public CompletableFuture<Optional<V>> resolve(K key) {
-        return resolve(key, options.policy());
-    }
-
-    @Override
-    public CompletableFuture<Optional<V>> resolve(K key, CachePolicy policy) {
-        CacheEntry<V> observed = store.get(key);
-        if (observed != null && policy.isFresh(observed)) {
-            return CompletableFuture.completedFuture(Optional.of(observed.getValue()));
+    public CompletableFuture<CacheEntry<V>> resolveCell(K key, CachePolicy policy) {
+        CacheEntry<V> existing = store.get(key);
+        if (serveable(existing, policy)) {
+            return CompletableFuture.completedFuture(existing);
         }
-        final CacheEntry<V> previous = observed; // null (absent) or a stale entry
+        if (!policy.cacheable()) {
+            // True bypass: load without caching; hand back a throwaway, unshared cell.
+            return repository.find(key)
+                    .thenApply(opt -> opt.isPresent() ? new CacheEntry<>(opt.get()) : null);
+        }
+        // A cold miss has no cell yet; anything else (stale, or a tombstone) is a reload.
+        final boolean coldMiss = (existing == null);
+        final long stamp = stampGen.incrementAndGet();
         return repository.find(key).thenApply(opt -> {
             if (!opt.isPresent()) {
-                return opt;
+                return null;
             }
             V value = opt.get();
-            if (!policy.cacheable()) {
-                return Optional.of(value); // true bypass: never touch the shared cache
-            }
-            return Optional.of(publishLoaded(key, previous, value));
+            CacheEntry<V> cell = coldMiss
+                    ? store.installColdMiss(key, value, stamp)   // keep-first, but loses to a newer delete
+                    : updateInPlace(key, value, stamp);          // stamp-guarded (resurrects an older tombstone)
+            return cell.isDeleted() ? null : cell;               // a newer delete won -> treat as absent
         });
     }
 
+    /** A cell is serveable when it is present, live (not a tombstone), not evicted, and fresh. */
+    private static boolean serveable(CacheEntry<?> cell, CachePolicy policy) {
+        return cell != null && !cell.isEvicted() && !cell.isDeleted() && policy.isFresh(cell);
+    }
+
     /**
-     * Publishes a freshly loaded value while keeping the identity map stable under concurrency:
-     * the first instance published for a key wins (concurrent cold misses converge), and an
-     * authoritative {@link #save} is never clobbered by a slower reload.
+     * Authoritative / stale-reload publish: update the key's cell <b>in place</b> (swap value),
+     * guarded by a monotonic stamp so a slower writer never regresses a newer one. Creates the cell
+     * if absent. Returns the live cell - the same instance any memoized holder already points at.
      */
-    private V publishLoaded(K key, CacheEntry<V> previous, V value) {
-        CacheEntry<V> candidate = new CacheEntry<>(value);
-        if (previous == null) {
-            // Cold miss: install only if still absent; otherwise keep whoever won the race.
-            return store.installIfAbsent(key, candidate).getValue();
-        }
-        // Stale reload: replace exactly the entry we judged stale; if it changed underneath us
-        // (a concurrent save or another reload), keep the current canonical instance.
-        if (store.replaceIfSame(key, previous, candidate)) {
-            return value;
-        }
-        CacheEntry<V> current = store.get(key);
-        return current != null ? current.getValue() : value;
+    private CacheEntry<V> updateInPlace(K key, V value, long stamp) {
+        CacheEntry<V> cell = store.installIfAbsent(key, new CacheEntry<>(value));
+        cell.publish(value, stamp);
+        return cell;
     }
 
     // ------------------------------------------------------------------
@@ -137,7 +147,7 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         List<K> misses = new ArrayList<>();
         for (K key : keys) {
             CacheEntry<V> entry = store.get(key);
-            if (entry != null && policy.isFresh(entry)) {
+            if (serveable(entry, policy)) {
                 hits.put(key, entry.getValue());
             } else {
                 misses.add(key);
@@ -151,8 +161,8 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
             List<V> result = new ArrayList<>(hits.values());
             for (V value : loaded) {
                 if (cacheable) {
-                    // installIfAbsent keeps identity stable (a concurrently cached instance wins).
-                    result.add(store.installIfAbsent(keyOf.apply(value), new CacheEntry<>(value)).getValue());
+                    // Update the cell in place (refreshes a stale entry; creates one if absent).
+                    result.add(updateInPlace(keyOf.apply(value), value, stampGen.incrementAndGet()).getValue());
                 } else {
                     result.add(value);
                 }
@@ -189,10 +199,38 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      */
     public CompletableFuture<Void> saveAndCache(V value) {
         final K key = keyOf.apply(value);
+        final long stamp = stampGen.incrementAndGet();
         return repository.save(value).whenComplete((ignored, ex) -> {
             if (ex == null) {
-                store.put(key, new CacheEntry<>(value));
+                if (options.policy().cacheable()) {
+                    updateInPlace(key, value, stamp);   // write-through: update the cell in place
+                }
             } else if (isOptimisticLock(ex)) {
+                store.remove(key);
+            }
+        });
+    }
+
+    /**
+     * Deletes the entity from the backend <b>and</b> evicts it from the cache - the delete
+     * counterpart of {@link #saveAndCache}. The eviction always runs (whether or not the key was
+     * cached), so a deleted entity is never left dangling in the cache. Prefer this over
+     * {@code repository().delete(key)}, which removes from the backend but leaves a stale cache entry.
+     *
+     * <p>On success the cache slot becomes a stamp-ordered <b>tombstone</b> rather than just being
+     * removed: this blocks a concurrent in-flight reload (one that read the entity before the delete)
+     * from re-installing the now-deleted entity. The tombstone is cleared by a later re-save (which
+     * resurrects it), by {@link #purgeExpired()}, or by LRU eviction. A failed delete just
+     * invalidates (the entity may still exist, so the next read reloads it).
+     *
+     * @return whether the entity existed in the backend
+     */
+    public CompletableFuture<Boolean> deleteAndEvict(K key) {
+        final long stamp = stampGen.incrementAndGet();
+        return repository.delete(key).whenComplete((existed, ex) -> {
+            if (ex == null) {
+                store.tombstone(key, stamp);
+            } else {
                 store.remove(key);
             }
         });
@@ -229,7 +267,7 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      * this periodically to proactively release stale entries.
      */
     public int purgeExpired() {
-        return store.purge(entry -> !options.policy().isFresh(entry));
+        return store.purge(entry -> entry.isDeleted() || !options.policy().isFresh(entry));
     }
 
     // ------------------------------------------------------------------
@@ -245,9 +283,9 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         return type;
     }
 
-    /** Current number of cached entries. */
+    /** Current number of <b>live</b> cached entries (tombstones from deletes are not counted). */
     public int cachedSize() {
-        return store.size();
+        return store.liveCount();
     }
 
     /** Unwraps {@link CompletableFuture}/reflection wrappers to detect an optimistic-lock failure. */

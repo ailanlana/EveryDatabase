@@ -10,8 +10,10 @@ import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.JsonDeserializer;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.deser.ContextualDeserializer;
+import com.fasterxml.jackson.databind.introspect.AnnotatedMember;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.time.Duration;
 
 /**
@@ -52,7 +54,7 @@ public final class RefDeserializer extends JsonDeserializer<Ref> implements Cont
             // Types not recoverable here - keep this instance; deserialize() fails with a clear message.
             return this;
         }
-        CachePolicy refOverride = (property != null) ? policyOf(property.getAnnotation(RefPolicy.class)) : null;
+        CachePolicy refOverride = (property != null) ? policyOf(findRefPolicy(property)) : null;
         return new RefDeserializer(refType.containedType(0), refType.containedType(1), refOverride);
     }
 
@@ -80,6 +82,31 @@ public final class RefDeserializer extends JsonDeserializer<Ref> implements Cont
     public Ref getNullValue(DeserializationContext ctxt) {
         // A JSON null round-trips to an empty Ref (never a bare null), so callers never NPE.
         return valueType != null ? Ref.empty(valueType.getRawClass()) : null;
+    }
+
+    /**
+     * Finds the {@link RefPolicy} for a property. With Lombok {@code @Data} the field is private and
+     * accessed through a generated setter, so {@code BeanProperty.getAnnotation} (which inspects the
+     * mutator) may miss a field-level annotation - fall back to the declared field by name.
+     */
+    private static RefPolicy findRefPolicy(BeanProperty property) {
+        RefPolicy direct = property.getAnnotation(RefPolicy.class);
+        if (direct != null) {
+            return direct;
+        }
+        AnnotatedMember member = property.getMember();
+        if (member == null) {
+            return null;
+        }
+        for (Class<?> c = member.getDeclaringClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                Field field = c.getDeclaredField(property.getName());
+                return field.getAnnotation(RefPolicy.class);   // present or null - the field is the source
+            } catch (NoSuchFieldException ignored) {
+                // not declared here - walk up the hierarchy
+            }
+        }
+        return null;
     }
 
     /** Converts a {@link RefPolicy} annotation to a {@link CachePolicy}, or {@code null} to inherit. */
