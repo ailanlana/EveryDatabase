@@ -31,6 +31,7 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 - [Schema migrations](#schema-migrations)
 - [Moving data between backends](#moving-data-between-backends)
 - [Logging & diagnostics](#logging--diagnostics)
+- [Caching & references (`everydatabase-manager`)](#caching--references-everydatabase-manager)
 - [Building & running the tests](#building--running-the-tests)
 - [Project layout](#project-layout)
 - [Compatibility notes](#compatibility-notes)
@@ -633,6 +634,38 @@ StorageLogSinks.installDefault(event -> plugin.getLogger().info(event.format()))
 
 ---
 
+## Caching & references (`everydatabase-manager`)
+
+An **optional add-on module** that sits *in front of* the core: hold a **typed reference** to an entity in another collection (and even another **database**), cache the hot ones with a policy you control, and resolve them lazily. It's a façade — the core stays untouched. A reference *is not* a cache: `Ref` is the pointer, the `CachingManager` is the cache.
+
+```groovy
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.1'   // pulls core transitively
+```
+
+```java
+// An entity references another by a typed Ref — stored as just the key on disk ("guild":"<uuid>").
+@Data @NoArgsConstructor @AllArgsConstructor
+public class Player {
+    private UUID uuid;
+    private Ref<UUID, Guild> guild;
+}
+
+// One manager per entity type (it self-registers); each can be backed by a DIFFERENT backend.
+CachingManager<UUID, Guild> guilds = new CachingManager<>(GUILDS, storage, CachePolicy.always());
+
+Player p = playerRepo.find(id).join().orElseThrow();
+Optional<Guild> g = p.getGuild().peek();          // synchronous, cache-only (the hot path)
+p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-and-cache
+```
+
+- **Typed refs that serialize as the key** — no embedded objects, no ORM; the target type is recovered from the field on read.
+- **Caching with a policy you own** — `always()` / `ttl(...)` / `noCache()`, a per-field `@RefPolicy` override, and an LRU `maxSize`. `peek()` is a lock-free, cache-only read; `resolve()` loads on a miss; `getAll(...)` batches (the N+1 antidote); `saveAndCache` / `deleteAndEvict` keep cache and backend consistent.
+- **Cross-backend by design** — because a reference resolves through its type's manager, a single root entity can fan out across MySQL, PostgreSQL, Mongo, H2, files and memory **at once**, each reference under its own key type.
+
+**→ Full guide: [`manager/README.md`](manager/README.md).** Design rationale: [`specs/SPEC_refs_and_managers.md`](specs/SPEC_refs_and_managers.md).
+
+---
+
 ## Building & running the tests
 
 ### Prerequisites
@@ -705,6 +738,7 @@ EveryDatabase/
 │   └── src/test/java/                   # backend-agnostic contract suites + per-backend + stress tests
 ├── standalone/                          # fat-jar flavor (everydatabase-standalone) — shadow/relocation packaging, no sources
 ├── libby/                               # runtime-download flavor (everydatabase-libby) — DependencyManager, EveryDatabaseDependencies
+├── manager/                             # OPTIONAL add-on (everydatabase-manager) — typed refs + caching (see manager/README.md)
 └── docker-compose.yml                   # MariaDB / PostgreSQL / MongoDB for the integration suites
 ```
 
