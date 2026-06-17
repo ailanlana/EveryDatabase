@@ -1,4 +1,4 @@
-package br.com.finalcraft.everydatabase.manager.testdata.twoworlds;
+package br.com.finalcraft.everydatabase.manager.testdata.tworegistries;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -7,10 +7,10 @@ import lombok.NoArgsConstructor;
 import java.util.UUID;
 
 /**
- * The shared referenced type in the two-world example: the <b>same</b> {@code Hero} type is
+ * The shared referenced type in the two-registry example: the <b>same</b> {@code Hero} type is
  * registered in two independent {@code RefRegistry} contexts, backed by different storages. The
- * same hero id therefore resolves to <b>different data</b> depending on which world (registry)
- * resolves it - which is impossible with a single global registry.
+ * same hero id therefore resolves to <b>different data</b> depending on which registry resolves
+ * it - which is impossible with a single global registry.
  */
 @Data
 @NoArgsConstructor

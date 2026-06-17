@@ -57,7 +57,7 @@ class NestedRefTest {
         UUID gid = UUID.randomUUID();
         UUID bid = UUID.randomUUID();
         battle.saveAndCache(new GuildBattleData(bid, 42)).join();
-        guilds.saveAndCache(new Guild(gid, "Knights", Ref.of(bid, GuildBattleData.class))).join();
+        guilds.saveAndCache(new Guild(gid, "Knights", Ref.of(bid, GuildBattleData.class, null))).join();
 
         // Force a load from the backend: the write-through cache holds the original instance whose
         // ref was built programmatically (no override), whereas the @RefPolicy(ttlSeconds = 180)

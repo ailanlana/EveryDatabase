@@ -1,4 +1,4 @@
-package br.com.finalcraft.everydatabase.manager.testdata.twoworlds;
+package br.com.finalcraft.everydatabase.manager.testdata.tworegistries;
 
 import br.com.finalcraft.everydatabase.manager.Ref;
 import br.com.finalcraft.everydatabase.manager.testdata.multibackend.Clan;

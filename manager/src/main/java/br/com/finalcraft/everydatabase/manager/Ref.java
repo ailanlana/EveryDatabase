@@ -33,9 +33,11 @@ import java.util.concurrent.CompletableFuture;
  *   <li>built programmatically to resolve - use {@link RefRegistry#ref(Object, Class)} (or
  *       {@code Ref.of(key, type, registry)}).</li>
  * </ul>
- * A bare {@link #of(Object, Class)} is <b>unbound</b>: perfectly fine to build and store (only the
- * key is serialized), but calling {@link #peek()}/{@link #resolve()} on it fails fast with a clear
- * message rather than guessing a resolver - there is no global registry to fall back to.
+ * Passing {@code null} as the registry ({@code Ref.of(key, type, null)}) makes an <b>unbound</b>
+ * reference: perfectly fine to build and store (only the key is serialized), but calling
+ * {@link #peek()}/{@link #resolve()} on it fails fast with a clear message rather than guessing a
+ * resolver - there is no global registry to fall back to. The registry is always an explicit
+ * argument, so that choice is visible at the call site.
  *
  * <p>An optional per-reference {@link CachePolicy} override (typically declared with
  * {@code @RefPolicy}) changes only this reference's freshness verdict; the cached value stays
@@ -69,15 +71,16 @@ public final class Ref<K, V> {
     // ------------------------------------------------------------------
 
     /**
-     * An <b>unbound</b> reference to {@code key} of type {@code type}. Safe to build and store (it
-     * serializes as just the key); to resolve it, bind a registry - {@link #of(Object, Class, RefRegistry)},
-     * {@link RefRegistry#ref(Object, Class)}, or read it back through a {@link RefRegistry#codec(Class)}.
+     * A reference to {@code key} of type {@code type}, bound to {@code registry} (resolution goes
+     * there), using the manager's default policy.
+     *
+     * <p>The registry is a required, explicit argument. For a bound reference prefer
+     * {@link RefRegistry#ref(Object, Class)}. Pass {@code null} <b>deliberately</b> for an
+     * <b>unbound</b> reference - one you only intend to store (it serializes as just the key); calling
+     * {@link #peek()}/{@link #resolve()} on an unbound reference fails fast. Requiring the explicit
+     * {@code null} keeps that choice, and its consequence, visible at the call site (there is no
+     * convenience overload that hides it).
      */
-    public static <K, V> Ref<K, V> of(K key, Class<V> type) {
-        return new Ref<>(key, type, null, null);
-    }
-
-    /** A reference bound to {@code registry}, using the manager's default policy. */
     public static <K, V> Ref<K, V> of(K key, Class<V> type, RefRegistry registry) {
         return new Ref<>(key, type, registry, null);
     }

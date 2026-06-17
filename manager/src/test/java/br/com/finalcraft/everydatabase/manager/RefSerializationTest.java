@@ -26,7 +26,7 @@ class RefSerializationTest {
     void ref_serializes_as_its_key_not_an_embedded_object() throws Exception {
         UUID playerId = UUID.randomUUID();
         UUID guildId = UUID.randomUUID();
-        Player player = new Player(playerId, Ref.of(guildId, Guild.class));
+        Player player = new Player(playerId, Ref.of(guildId, Guild.class, null));
 
         String json = mapper.writeValueAsString(player);
 
@@ -39,7 +39,7 @@ class RefSerializationTest {
     @Test
     void ref_deserializes_with_key_and_type_recovered_from_the_field() throws Exception {
         UUID guildId = UUID.randomUUID();
-        Player player = new Player(UUID.randomUUID(), Ref.of(guildId, Guild.class));
+        Player player = new Player(UUID.randomUUID(), Ref.of(guildId, Guild.class, null));
 
         Player back = mapper.readValue(mapper.writeValueAsString(player), Player.class);
 
@@ -63,7 +63,7 @@ class RefSerializationTest {
     @Test
     void refPolicy_noCache_annotation_is_baked_into_the_ref() throws Exception {
         UUID guildId = UUID.randomUUID();
-        PlayerNoCache player = new PlayerNoCache(UUID.randomUUID(), Ref.of(guildId, Guild.class));
+        PlayerNoCache player = new PlayerNoCache(UUID.randomUUID(), Ref.of(guildId, Guild.class, null));
 
         PlayerNoCache back = mapper.readValue(mapper.writeValueAsString(player), PlayerNoCache.class);
 
@@ -76,7 +76,7 @@ class RefSerializationTest {
     @Test
     void refPolicy_ttl_annotation_is_baked_into_the_ref() throws Exception {
         UUID guildId = UUID.randomUUID();
-        PlayerTtl player = new PlayerTtl(UUID.randomUUID(), Ref.of(guildId, Guild.class));
+        PlayerTtl player = new PlayerTtl(UUID.randomUUID(), Ref.of(guildId, Guild.class, null));
 
         PlayerTtl back = mapper.readValue(mapper.writeValueAsString(player), PlayerTtl.class);
 
@@ -92,7 +92,7 @@ class RefSerializationTest {
         UUID g1 = UUID.randomUUID();
         UUID g2 = UUID.randomUUID();
         Squad squad = new Squad(UUID.randomUUID(),
-                Arrays.asList(Ref.of(g1, Guild.class), Ref.of(g2, Guild.class)));
+                Arrays.asList(Ref.of(g1, Guild.class, null), Ref.of(g2, Guild.class, null)));
 
         Squad back = mapper.readValue(mapper.writeValueAsString(squad), Squad.class);
 

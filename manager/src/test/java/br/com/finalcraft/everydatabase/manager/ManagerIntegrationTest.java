@@ -62,7 +62,7 @@ class ManagerIntegrationTest {
         guilds.saveAndCache(new Guild(guildId, "Knights")).join();
 
         UUID playerId = UUID.randomUUID();
-        players.saveAndCache(new Player(playerId, Ref.of(guildId, Guild.class))).join();
+        players.saveAndCache(new Player(playerId, Ref.of(guildId, Guild.class, null))).join();
 
         // Force a fresh deserialization of the player (serialize -> store -> decode -> resolve).
         players.evict(playerId);
@@ -85,7 +85,7 @@ class ManagerIntegrationTest {
         guilds.saveAndCache(new Guild(c, "C")).join();
 
         Squad squad = new Squad(UUID.randomUUID(), Arrays.asList(
-                Ref.of(a, Guild.class), Ref.of(b, Guild.class), Ref.of(c, Guild.class)));
+                Ref.of(a, Guild.class, null), Ref.of(b, Guild.class, null), Ref.of(c, Guild.class, null)));
 
         // Batch-resolve the members' keys via the guild manager (the in-loop N+1 antidote).
         List<UUID> keys = squad.getMembers().stream().map(Ref::key).collect(Collectors.toList());

@@ -345,8 +345,8 @@ class CachingManagerTest {
 
     @Test
     void ref_resolve_when_unbound_returns_a_failed_future() {
-        // An unbound Ref.of(...) has no registry to resolve against - it must fail fast, not guess.
-        Ref<UUID, String> ref = Ref.of(UUID.randomUUID(), String.class);
+        // An unbound ref (explicit null registry) has nothing to resolve against - it must fail fast, not guess.
+        Ref<UUID, String> ref = Ref.of(UUID.randomUUID(), String.class, null);
 
         CompletableFuture<Optional<String>> future = ref.resolve();
 

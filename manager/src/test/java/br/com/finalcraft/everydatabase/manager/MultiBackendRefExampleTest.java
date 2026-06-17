@@ -10,10 +10,10 @@ import br.com.finalcraft.everydatabase.manager.testdata.multibackend.Session;
 import br.com.finalcraft.everydatabase.manager.testdata.multibackend.Settings;
 import br.com.finalcraft.everydatabase.manager.testdata.multibackend.Stats;
 import br.com.finalcraft.everydatabase.manager.testdata.multibackend.Wallet;
-import br.com.finalcraft.everydatabase.manager.testdata.twoworlds.Cosmetics;
-import br.com.finalcraft.everydatabase.manager.testdata.twoworlds.Hero;
-import br.com.finalcraft.everydatabase.manager.testdata.twoworlds.LobbyProfile;
-import br.com.finalcraft.everydatabase.manager.testdata.twoworlds.SurvivalProfile;
+import br.com.finalcraft.everydatabase.manager.testdata.tworegistries.Cosmetics;
+import br.com.finalcraft.everydatabase.manager.testdata.tworegistries.Hero;
+import br.com.finalcraft.everydatabase.manager.testdata.tworegistries.LobbyProfile;
+import br.com.finalcraft.everydatabase.manager.testdata.tworegistries.SurvivalProfile;
 import br.com.finalcraft.everydatabase.modules.localfile.LocalFileConfig;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import br.com.finalcraft.everydatabase.modules.mongo.MongoConfig;
@@ -61,7 +61,7 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
  * {@link #two_subsystems_resolve_the_same_types_through_their_own_registries()} models two
  * independent authors/plugins. Each owns its own {@link RefRegistry} and its own stores, and both
  * register a manager for the <b>same</b> types ({@code Hero}, {@code Wallet}). The same hero id and
- * wallet account resolve to <b>different data</b> in each world - which a single global registry
+ * wallet account resolve to <b>different data</b> in each registry - which a single global registry
  * (one resolver per type, last-writer-wins) could never express.
  *
  * <p>The network backends require Docker and self-skip when down; the embedded variants always run.
@@ -138,24 +138,24 @@ class MultiBackendRefExampleTest {
     }
 
     /** The single-registry fan-out, shared by both tests above (only the backends differ). */
-    private void fanOut(RefRegistry world,
+    private void fanOut(RefRegistry refRegistry,
                         Storage profilesStore, Storage clansStore, Storage walletsStore,
                         Storage statsStore, Storage settingsStore, Storage sessionsStore) {
 
         // one manager per entity type, each backed by its given store, each with its own key type,
-        // all registered in the same world.
-        CachingManager<String, Clan> clans = world.manager(
-                desc(world, String.class, Clan.class, "clans", Clan::getTag), clansStore, CachePolicy.always());
-        CachingManager<Long, Wallet> wallets = world.manager(
-                desc(world, Long.class, Wallet.class, "wallets", Wallet::getAccountNumber), walletsStore, CachePolicy.always());
-        CachingManager<Integer, Stats> stats = world.manager(
-                desc(world, Integer.class, Stats.class, "stats", Stats::getId), statsStore, CachePolicy.always());
-        CachingManager<Settings.Key, Settings> settings = world.manager(
-                desc(world, Settings.Key.class, Settings.class, "settings", Settings::getKey), settingsStore, CachePolicy.always());
-        CachingManager<Session.Id, Session> sessions = world.manager(
-                desc(world, Session.Id.class, Session.class, "sessions", Session::getId), sessionsStore, CachePolicy.always());
-        CachingManager<UUID, PlayerProfile> profiles = world.manager(
-                desc(world, UUID.class, PlayerProfile.class, "profiles", PlayerProfile::getUuid), profilesStore, CachePolicy.always());
+        // all registered in the same registry.
+        CachingManager<String, Clan> clans = refRegistry.manager(
+                desc(refRegistry, String.class, Clan.class, "clans", Clan::getTag), clansStore, CachePolicy.always());
+        CachingManager<Long, Wallet> wallets = refRegistry.manager(
+                desc(refRegistry, Long.class, Wallet.class, "wallets", Wallet::getAccountNumber), walletsStore, CachePolicy.always());
+        CachingManager<Integer, Stats> stats = refRegistry.manager(
+                desc(refRegistry, Integer.class, Stats.class, "stats", Stats::getId), statsStore, CachePolicy.always());
+        CachingManager<Settings.Key, Settings> settings = refRegistry.manager(
+                desc(refRegistry, Settings.Key.class, Settings.class, "settings", Settings::getKey), settingsStore, CachePolicy.always());
+        CachingManager<Session.Id, Session> sessions = refRegistry.manager(
+                desc(refRegistry, Session.Id.class, Session.class, "sessions", Session::getId), sessionsStore, CachePolicy.always());
+        CachingManager<UUID, PlayerProfile> profiles = refRegistry.manager(
+                desc(refRegistry, UUID.class, PlayerProfile.class, "profiles", PlayerProfile::getUuid), profilesStore, CachePolicy.always());
 
         // write each inner entity into its own store, under its own key type
         clans.saveAndCache(new Clan("KNIGHTS", "The Knights")).join();          // String key
@@ -170,11 +170,11 @@ class MultiBackendRefExampleTest {
         UUID profileId = UUID.randomUUID();
         profiles.saveAndCache(new PlayerProfile(
             profileId,
-            world.ref("KNIGHTS", Clan.class),
-            world.ref(100_000_001L, Wallet.class),
-            world.ref(7, Stats.class),
-            world.ref(settingsKey, Settings.class),
-            world.ref(sessionId, Session.class)
+            refRegistry.ref("KNIGHTS", Clan.class),
+            refRegistry.ref(100_000_001L, Wallet.class),
+            refRegistry.ref(7, Stats.class),
+            refRegistry.ref(settingsKey, Settings.class),
+            refRegistry.ref(sessionId, Session.class)
         )).join();
 
         // reload the root (force a decode), then resolve every reference across stores/key types
@@ -196,7 +196,7 @@ class MultiBackendRefExampleTest {
 
     @Test
     void two_subsystems_resolve_the_same_types_through_their_own_registries() {
-        // Two independent "worlds" - think two plugins by two authors. Each has its OWN registry and
+        // Two independent registries - think two plugins by two authors. Each has its OWN registry and
         // its OWN stores. Both register a manager for Hero and for Wallet (the same types!), which is
         // impossible to do safely with one global registry.
         H2SqlStorage survivalDb = open(Storages.createH2(new SqlConfig(
@@ -206,7 +206,7 @@ class MultiBackendRefExampleTest {
         Storage survivalWalletFiles = open(Storages.createLocalFile(new LocalFileConfig(localFileDir)));
         InMemoryStorage lobbyMem = open(Storages.createInMemory());
 
-        // --- Survival world: hero + clan in H2, wallet on disk ---
+        // --- Survival registry: hero + clan in H2, wallet on disk ---
         RefRegistry survival = new RefRegistry();
         CachingManager<UUID, Hero> survivalHeroes = survival.manager(
                 desc(survival, UUID.class, Hero.class, "heroes", Hero::getId), survivalDb, CachePolicy.always());
@@ -217,7 +217,7 @@ class MultiBackendRefExampleTest {
         CachingManager<UUID, SurvivalProfile> survivalProfiles = survival.manager(
                 desc(survival, UUID.class, SurvivalProfile.class, "profiles", SurvivalProfile::getUuid), survivalDb, CachePolicy.always());
 
-        // --- Lobby world: hero + cosmetics in memory, wallet in a DIFFERENT H2 ---
+        // --- Lobby registry: hero + cosmetics in memory, wallet in a DIFFERENT H2 ---
         RefRegistry lobby = new RefRegistry();
         CachingManager<UUID, Hero> lobbyHeroes = lobby.manager(
                 desc(lobby, UUID.class, Hero.class, "heroes", Hero::getId), lobbyMem, CachePolicy.always());
@@ -228,7 +228,7 @@ class MultiBackendRefExampleTest {
         CachingManager<UUID, LobbyProfile> lobbyProfiles = lobby.manager(
                 desc(lobby, UUID.class, LobbyProfile.class, "profiles", LobbyProfile::getUuid), lobbyWalletDb, CachePolicy.always());
 
-        // The SAME ids in both worlds - deliberately, to prove they never collide.
+        // The SAME ids in both registries - deliberately, to prove they never collide.
         UUID heroId = UUID.randomUUID();
         Long walletAccount = 555_000L;
         UUID profileId = UUID.randomUUID();
@@ -249,27 +249,27 @@ class MultiBackendRefExampleTest {
                 lobby.ref(7, Cosmetics.class),
                 lobby.ref(walletAccount, Wallet.class))).join();
 
-        // Force a decode of both roots so their refs are recovered (and re-bound to their world).
+        // Force a decode of both roots so their refs are recovered (and re-bound to their registry).
         survivalProfiles.evict(profileId);
         lobbyProfiles.evict(profileId);
         SurvivalProfile sp = survivalProfiles.resolve(profileId).join().orElseThrow(AssertionError::new);
         LobbyProfile lp = lobbyProfiles.resolve(profileId).join().orElseThrow(AssertionError::new);
 
         // THE POINT: the same hero id resolves to different entities, because each profile's ref is
-        // bound to its own world's registry (and thus its own store).
+        // bound to its own registry (and thus its own store).
         Hero survivalHero = sp.getHero().resolve().join().orElseThrow(AssertionError::new);
         Hero lobbyHero = lp.getHero().resolve().join().orElseThrow(AssertionError::new);
         assertEquals("Aragorn the Survivor", survivalHero.getName());
         assertEquals(80, survivalHero.getLevel());
         assertEquals("Aragorn in the Lobby", lobbyHero.getName());
         assertEquals(1, lobbyHero.getLevel());
-        assertNotSame(survivalHero, lobbyHero, "the two worlds hand out independent instances");
+        assertNotSame(survivalHero, lobbyHero, "the two registries hand out independent instances");
 
         // The same wallet account resolves to different balances, across different backends.
         assertEquals(9_999L, sp.getWallet().resolve().join().orElseThrow(AssertionError::new).getBalance()); // -> LocalFile
         assertEquals(25L, lp.getWallet().resolve().join().orElseThrow(AssertionError::new).getBalance());    // -> H2
 
-        // World-specific references resolve only within their own world.
+        // Registry-specific references resolve only within their own registry.
         assertEquals("Rangers of the North", sp.getClan().resolve().join().orElseThrow(AssertionError::new).getName());
         assertEquals("golden_cape", lp.getCosmetics().resolve().join().orElseThrow(AssertionError::new).getActiveSkin());
 
@@ -291,12 +291,12 @@ class MultiBackendRefExampleTest {
         return storage;
     }
 
-    private static <K, T> EntityDescriptor<K, T> desc(RefRegistry world, Class<K> keyType, Class<T> type,
+    private static <K, T> EntityDescriptor<K, T> desc(RefRegistry refRegistry, Class<K> keyType, Class<T> type,
                                                       String collection, Function<T, K> key) {
         return EntityDescriptor.builder(keyType, type)
                 .collection(collection)
                 .keyExtractor(key)
-                .codec(world.codec(type))     // ref-aware codec bound to this world
+                .codec(refRegistry.codec(type))     // ref-aware codec bound to this registry
                 .build();
     }
 

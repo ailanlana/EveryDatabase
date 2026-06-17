@@ -11,7 +11,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * A self-contained <b>world of references</b>: it maps each entity type to its
+ * A <b>per-context registry of references</b>: it maps each entity type to its
  * {@link RefResolver} (its manager) and is the single object you wire your refs through.
  *
  * <p>There is <b>no global registry</b> on purpose. Each context (a plugin, a subsystem, a
@@ -31,15 +31,15 @@ import java.util.concurrent.ConcurrentHashMap;
  * </ul>
  *
  * <pre>{@code
- * RefRegistry world = new RefRegistry();
+ * RefRegistry refRegistry = new RefRegistry();
  *
  * EntityDescriptor<UUID, Guild> GUILDS = EntityDescriptor.builder(UUID.class, Guild.class)
  *         .collection("guilds")
  *         .keyExtractor(Guild::getId)
- *         .codec(world.codec(Guild.class))     // bound to 'world'
+ *         .codec(refRegistry.codec(Guild.class))     // bound to this registry
  *         .build();
  *
- * CachingManager<UUID, Guild> guilds = world.manager(GUILDS, guildStorage, CachePolicy.always());
+ * CachingManager<UUID, Guild> guilds = refRegistry.manager(GUILDS, guildStorage, CachePolicy.always());
  * }</pre>
  *
  * <p>The map is a {@link ConcurrentHashMap}; registration and lookup are thread-safe.
@@ -119,7 +119,7 @@ public final class RefRegistry {
     /**
      * A {@link Ref} bound to this registry — for resolving a key you hold programmatically (the
      * common case is a {@code Ref} deserialized from an entity, which the {@link #codec(Class)}
-     * binds automatically). Resolving an <b>unbound</b> {@code Ref.of(key, type)} fails fast.
+     * binds automatically). Resolving an <b>unbound</b> {@code Ref.of(key, type, null)} fails fast.
      */
     public <K, V> Ref<K, V> ref(K key, Class<V> type) {
         return Ref.of(key, type, this);
