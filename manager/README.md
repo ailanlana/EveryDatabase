@@ -25,6 +25,7 @@ you control, and resolve them lazily — without turning the library into an ORM
 - [Writing & deleting through the cache](#writing--deleting-through-the-cache)
 - [Nested references](#nested-references)
 - [⭐ One entity, many databases, many key types](#-one-entity-many-databases-many-key-types)
+- [Multiple registries — the same type, different resolvers](#multiple-registries--the-same-type-different-resolvers)
 - [What it guarantees (and what it doesn't)](#what-it-guarantees-and-what-it-doesnt)
 - [Non-goals](#non-goals)
 
@@ -87,24 +88,26 @@ public class Player {
     private Ref<UUID, Guild> guild;   // -> "guild":"<uuid>" in the stored JSON
 }
 
-// 2. A manager per entity type. It self-registers, so any Ref<?, Guild> resolves through it.
+// 2. A RefRegistry owns your refs. It vends the ref-aware codec and the manager, so a
+//    Ref<?, Guild> read through this world resolves through this world's Guild manager.
+RefRegistry world = new RefRegistry();
+
 EntityDescriptor<UUID, Guild> GUILDS = EntityDescriptor.builder(UUID.class, Guild.class)
         .collection("guilds")
         .keyExtractor(Guild::getId)
-        .codec(RefCodecs.json(Guild.class))         // ref-aware Jackson codec
+        .codec(world.codec(Guild.class))            // ref-aware codec bound to 'world'
         .build();
 
-CachingManager<UUID, Guild> guilds =
-        new CachingManager<>(GUILDS, storage, CachePolicy.always());
+CachingManager<UUID, Guild> guilds = world.manager(GUILDS, storage, CachePolicy.always());
 
 // 3. Resolve a reference — it goes through the Guild manager (its cache, its backend).
-Player p = playerRepo.find(playerId).join().orElseThrow();
+Player p = playerRepo.find(playerId).join().orElseThrow();   // playerRepo built with world.codec(Player.class)
 Optional<Guild> g = p.getGuild().peek();          // synchronous, cache-only (the hot path)
 p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-and-cache
 ```
 
 `peek()` never does I/O; `resolve()` loads on a miss. The `Player` neither knows nor cares where its
-`Guild` lives or how it's cached.
+`Guild` lives or how it's cached — only that its reference was read through `world`.
 
 ---
 
@@ -113,12 +116,12 @@ p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-a
 | Type | Role |
 |---|---|
 | **`Ref<K, V>`** | A typed, lazily-resolved reference. Serializes as its **key**; the target type `V` is recovered from the field declaration on read. |
-| **`CachingManager<K, V>`** | A cache-backed façade in front of one `Repository`. Owns an in-memory identity map and resolves `Ref`s to that type. Self-registers in `Refs`. |
-| **`Refs`** | Process-wide registry: entity type → its manager. A `Ref` finds its manager here. |
+| **`CachingManager<K, V>`** | A cache-backed façade in front of one `Repository`. Owns an in-memory identity map and resolves `Ref`s to that type. Registered in a `RefRegistry`. |
+| **`RefRegistry`** | A per-context registry: entity type → its manager. **No global default** — each context makes its own. It *vends* the ref-aware `codec(type)` and the `manager(...)`, and a `Ref` is bound to one and resolves there. |
 | **`CachePolicy`** | Freshness strategy: `always()`, `ttl(Duration)`, `noCache()`. Per-reference overridable. |
 | **`CacheOptions`** | Store-level config: default `CachePolicy` + `maxSize` (LRU bound). |
 | **`@RefPolicy`** | Per-field freshness override declared right on a `Ref` field. |
-| **`RefCodecs`** | Builds a Jackson codec that understands `Ref` fields (`RefCodecs.json(Type.class)`). |
+| **`RefCodecs`** | Builds a ref-aware Jackson codec bound to a registry (`registry.codec(Type.class)`, delegating to `RefCodecs.json(Type.class, registry)`). |
 
 The naming reflects the split: the **`Ref*`** family is *the reference*; the **`Cache*`** family is
 *the cache*.
@@ -132,7 +135,7 @@ On disk a `Ref<UUID, Guild> guild` is just `"guild":"<uuid>"` — byte-for-byte 
 from the field's generic declaration at deserialization (via a Jackson `ContextualDeserializer`), so
 the JSON stays clean and the Java side stays typed.
 
-Resolution goes through the entity type's manager (looked up in `Refs`):
+Resolution goes through the entity type's manager (looked up in the `Ref`'s bound `RefRegistry`):
 
 | Call | Blocking? | I/O? | Returns |
 |---|:---:|:---:|---|
@@ -145,27 +148,33 @@ read it directly — **lock-free, no map lookup** — and, because the cell upda
 always observes the latest value. A long-held `Ref` (e.g. on an online player) behaves like a
 self-refreshing live handle.
 
-Build a `Ref` programmatically with `Ref.of(key, Type.class)`; an empty reference is `Ref.empty(Type.class)`
-(a JSON `null` round-trips to an empty `Ref`, never a bare `null`).
+Build a bound `Ref` to resolve programmatically with `registry.ref(key, Type.class)`. A bare
+`Ref.of(key, Type.class)` is **unbound** — fine to build and store (only the key is serialized), but
+resolving it fails fast; bind it via the reading codec or `Ref.of(key, Type.class, registry)`. An
+empty reference is `Ref.empty(Type.class)` (a JSON `null` round-trips to an empty `Ref`, never a
+bare `null`).
 
-> **Codec.** Wrap entities that contain `Ref` fields with `RefCodecs.json(Type.class)` — it registers
-> the `RefModule` on the mapper. (Equivalent to passing your own `RefModule`-registered `ObjectMapper`
-> to `JacksonJsonCodec`.) Targets without `Ref` fields can use a plain `JacksonJsonCodec`.
+> **Codec.** Wrap entities that contain `Ref` fields with `registry.codec(Type.class)` — it builds a
+> codec with the `RefModule` bound to that registry, so every `Ref` it reads resolves there.
+> (Equivalent to `RefCodecs.json(Type.class, registry)`.) Targets without `Ref` fields can use a
+> plain `JacksonJsonCodec`, but reading them through `registry.codec(...)` is harmless too.
 
 ---
 
 ## `CachingManager` — the cache-backed façade
 
-Create one manager per entity type at startup; it self-registers in `Refs` (keyed by the entity type),
-so every `Ref<?, ThatType>` resolves through it. Subclass it for a domain name, or use it directly:
+Create one manager per entity type at startup, passing the `RefRegistry` it belongs to; it
+self-registers there (keyed by the entity type), so every `Ref<?, ThatType>` bound to that registry
+resolves through it. Use `registry.manager(...)` directly, or subclass it for a domain name and pass
+the registry to `super(...)`:
 
 ```java
 public final class GuildManager extends CachingManager<UUID, Guild> {
-    public GuildManager(Storage storage) {
+    public GuildManager(Storage storage, RefRegistry registry) {
         super(GUILDS, storage, CacheOptions.builder()
                 .policy(CachePolicy.always())   // small hot set: keep resident
                 .maxSize(1000)                  // ...but bounded
-                .build());
+                .build(), registry);
     }
 }
 ```
@@ -256,8 +265,8 @@ Nesting falls out for free: **each entity type has its own manager**, with its o
 `Guild` held in memory does **not** drag its `GuildBattleData` in — it only holds the key.
 
 ```java
-new GuildManager(storage).preloadAll().join();                    // guilds resident (always())
-new CachingManager<>(BATTLE, storage, CachePolicy.ttl(Duration.ofMinutes(3)));  // battle data lazy, 3-min TTL
+new GuildManager(storage, world).preloadAll().join();             // guilds resident (always())
+world.manager(BATTLE, storage, CachePolicy.ttl(Duration.ofMinutes(3)));  // battle data lazy, 3-min TTL
 
 Guild g = player.getGuild().peek().orElseThrow();                 // memory
 g.getBattleData().resolve().thenAccept(opt -> render(opt));       // backend on a cold miss, then TTL'd
@@ -286,13 +295,15 @@ public class PlayerProfile {
     private Ref<Session.Id, Session>    session;   // record key  -> InMemory
 }
 
-// One manager per type, each on its own backend:
-new CachingManager<>(PROFILES, mariadb,  CachePolicy.always());
-new CachingManager<>(CLANS,    postgres, CachePolicy.always());
-new CachingManager<>(WALLETS,  mongo,    CachePolicy.always());
-new CachingManager<>(STATS,    h2,       CachePolicy.always());
-new CachingManager<>(SETTINGS, localFile,CachePolicy.always());
-new CachingManager<>(SESSIONS, inMemory, CachePolicy.always());
+// One registry for this context; one manager per type, each on its own backend:
+RefRegistry world = new RefRegistry();
+world.manager(PROFILES, mariadb,  CachePolicy.always());
+world.manager(CLANS,    postgres, CachePolicy.always());
+world.manager(WALLETS,  mongo,    CachePolicy.always());
+world.manager(STATS,    h2,       CachePolicy.always());
+world.manager(SETTINGS, localFile,CachePolicy.always());
+world.manager(SESSIONS, inMemory, CachePolicy.always());
+// (each descriptor's codec is world.codec(Type.class), so the root's refs bind to 'world')
 
 // Load the root, then resolve each reference — every one hits a different database:
 PlayerProfile p = profiles.resolve(profileId).join().orElseThrow();
@@ -313,6 +324,37 @@ that runs without Docker) lives in
 
 ---
 
+## Multiple registries — the same type, different resolvers
+
+Because there is **no global registry**, two independent contexts (two plugins, two authors) can each
+register a manager for the **same** entity type, backed by **different** storages, and never collide.
+A `Ref` resolves only against the registry it was bound to (by the codec that read it), so the same
+key resolves to different data in different worlds:
+
+```java
+// Two worlds, each its own registry + its own stores. Both register a Hero manager.
+RefRegistry survival = new RefRegistry();
+RefRegistry lobby    = new RefRegistry();
+survival.manager(heroDesc(survival), survivalStore, CachePolicy.always());   // Hero -> survivalStore
+lobby.manager(heroDesc(lobby),       lobbyStore,    CachePolicy.always());    // Hero -> lobbyStore
+
+// SurvivalProfile read via survival.codec(...) -> its hero ref resolves in 'survival';
+// LobbyProfile read via lobby.codec(...)       -> its hero ref resolves in 'lobby'.
+survivalProfile.getHero().resolve();   // -> survivalStore's Hero
+lobbyProfile.getHero().resolve();      // -> lobbyStore's Hero (same id, different entity)
+```
+
+This is impossible with a single global `Class → resolver` map (the second `Hero` manager would
+overwrite the first). A full two-subsystem example — `SurvivalProfile`/`LobbyProfile` sharing the
+`Hero` and `Wallet` types across separate registries and backends — lives in
+[`MultiBackendRefExampleTest`](src/test/java/br/com/finalcraft/everydatabase/manager/MultiBackendRefExampleTest.java).
+
+> **Tip:** for a single-plugin app, one `RefRegistry` is all you need — make it at startup and pass
+> it to your codecs and managers. The point of dropping the global default is that you *can't* be
+> surprised by another plugin sharing it.
+
+---
+
 ## What it guarantees (and what it doesn't)
 
 The cache hands out the **same instance** per key for its lifetime — an identity map. Publication is
@@ -328,9 +370,6 @@ state, and freshness is bounded:
 
 Cross-process writes are invisible to a local cache — bound them with a TTL and/or an external
 invalidation signal wired to `manager.evict(key)`.
-
-Design rationale, the cell/stamp model and the full hazard analysis live in
-[`specs/SPEC_refs_and_managers.md`](../specs/SPEC_refs_and_managers.md).
 
 ---
 

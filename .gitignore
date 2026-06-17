@@ -37,3 +37,7 @@ hs_err_pid*
 **/.gradle
 
 localfilestorage/*
+
+# Local-only, intentionally not committed
+/CLAUDE.md
+/specs/
