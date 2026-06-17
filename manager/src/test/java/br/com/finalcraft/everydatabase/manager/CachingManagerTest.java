@@ -4,7 +4,6 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.manager.cache.CacheOptions;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
 import br.com.finalcraft.everydatabase.manager.testdata.Guild;
-import br.com.finalcraft.everydatabase.manager.jackson.RefCodecs;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import br.com.finalcraft.everydatabase.Storages;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
@@ -37,32 +36,33 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** The cache-backed manager: resolve/peek, write-through, batching, invalidation, per-ref policy. */
 class CachingManagerTest {
 
+    private RefRegistry registry;
     private InMemoryStorage storage;
     private EntityDescriptor<UUID, Guild> guildDescriptor;
 
     @BeforeEach
     void setUp() {
-        Refs.clear();
+        registry = new RefRegistry();
         storage = Storages.createInMemory();
         storage.init().join();
         guildDescriptor = EntityDescriptor.builder(UUID.class, Guild.class)
                 .collection("guilds")
                 .keyExtractor(g -> g.getId())
-                .codec(RefCodecs.json(Guild.class))   // Guild carries a Ref field (battleData)
+                .codec(registry.codec(Guild.class))   // Guild carries a Ref field (battleData)
                 .build();
     }
 
     @AfterEach
     void tearDown() {
-        Refs.clear();
+        storage.close().join();
     }
 
     private CachingManager<UUID, Guild> manager(CacheOptions options) {
-        return new CachingManager<>(guildDescriptor, storage, options);
+        return new CachingManager<>(guildDescriptor, storage, options, registry);
     }
 
     private CachingManager<UUID, Guild> manager(CachePolicy policy) {
-        return new CachingManager<>(guildDescriptor, storage, policy);
+        return new CachingManager<>(guildDescriptor, storage, policy, registry);
     }
 
     /** Seeds the backend directly (bypassing the manager's cache). */
@@ -187,7 +187,7 @@ class CachingManagerTest {
     void deleteAndEvict_makes_a_memoized_ref_resolve_empty() {
         CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
         UUID id = seedGuild(mgr, "Doomed");
-        Ref<UUID, Guild> ref = Ref.of(id, Guild.class);
+        Ref<UUID, Guild> ref = registry.ref(id, Guild.class);
         assertEquals("Doomed", ref.resolve().join().get().getName());   // memoizes the cell
 
         mgr.deleteAndEvict(id).join();
@@ -232,7 +232,7 @@ class CachingManagerTest {
         UUID id = UUID.randomUUID();
         mgr.saveAndCache(new Guild(id, "Before")).join();
 
-        Ref<UUID, Guild> ref = Ref.of(id, Guild.class);
+        Ref<UUID, Guild> ref = registry.ref(id, Guild.class);
         assertEquals("Before", ref.resolve().join().get().getName());   // memoizes the live cell
 
         // A later write updates the SAME cell in place...
@@ -246,7 +246,7 @@ class CachingManagerTest {
     void a_memoized_ref_re_resolves_after_its_cell_is_evicted() {
         CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
         UUID id = seedGuild(mgr, "X");
-        Ref<UUID, Guild> ref = Ref.of(id, Guild.class);
+        Ref<UUID, Guild> ref = registry.ref(id, Guild.class);
         assertEquals("X", ref.resolve().join().get().getName());        // memoizes the live cell
 
         mgr.evict(id);                                             // marks the cell evicted
@@ -333,12 +333,24 @@ class CachingManagerTest {
 
     @Test
     void ref_resolve_without_a_registered_manager_returns_a_failed_future() {
-        // No manager is registered for String in this test's cleared registry.
-        Ref<UUID, String> ref = Ref.of(UUID.randomUUID(), String.class);
+        // The ref is bound to this registry, but no manager is registered for String in it.
+        Ref<UUID, String> ref = registry.ref(UUID.randomUUID(), String.class);
 
         CompletableFuture<Optional<String>> future = ref.resolve();
 
         assertTrue(future.isCompletedExceptionally(), "wiring errors must surface via the future, not a sync throw");
+        CompletionException ex = assertThrows(CompletionException.class, future::join);
+        assertTrue(ex.getCause() instanceof IllegalStateException);
+    }
+
+    @Test
+    void ref_resolve_when_unbound_returns_a_failed_future() {
+        // An unbound Ref.of(...) has no registry to resolve against - it must fail fast, not guess.
+        Ref<UUID, String> ref = Ref.of(UUID.randomUUID(), String.class);
+
+        CompletableFuture<Optional<String>> future = ref.resolve();
+
+        assertTrue(future.isCompletedExceptionally(), "an unbound ref cannot resolve");
         CompletionException ex = assertThrows(CompletionException.class, future::join);
         assertTrue(ex.getCause() instanceof IllegalStateException);
     }

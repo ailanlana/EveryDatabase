@@ -4,7 +4,6 @@ import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.StorageKeys;
 import br.com.finalcraft.everydatabase.Storages;
-import br.com.finalcraft.everydatabase.manager.jackson.RefCodecs;
 import br.com.finalcraft.everydatabase.manager.testdata.multibackend.Clan;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
@@ -30,7 +29,7 @@ class StorageKeyValidationTest {
         return EntityDescriptor.builder(String.class, Clan.class)
                 .collection("clans")
                 .keyExtractor(c -> c.getTag())
-                .codec(RefCodecs.json(Clan.class))
+                .codec(new RefRegistry().codec(Clan.class))
                 .build();
     }
 

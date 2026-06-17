@@ -21,10 +21,11 @@ import java.util.function.Function;
  * A cache-backed façade in front of a single {@link Repository}: it owns an in-memory
  * identity map of its entities (one instance per key) and resolves {@link Ref}s to that type.
  *
- * <p>Construct one per entity type at startup; it self-registers in {@link Refs} (keyed by the
- * descriptor's entity type), so every {@code Ref<?, ThatType>} resolves through it. Subclass it
- * for a domain-named manager ({@code class GuildManager extends CachingManager<UUID, Guild>}),
- * or instantiate it directly.
+ * <p>Construct one per entity type at startup, passing the {@link RefRegistry} it belongs to; it
+ * self-registers there (keyed by the descriptor's entity type), so every {@code Ref<?, ThatType>}
+ * bound to that registry resolves through it. Prefer {@link RefRegistry#manager} for the common
+ * case; subclass it for a domain-named manager ({@code class GuildManager extends
+ * CachingManager<UUID, Guild>}) and pass the registry to {@code super(...)}.
  *
  * <h3>Freshness vs capacity</h3>
  * Freshness is a {@link CachePolicy} (default from {@link CacheOptions}, overridable per
@@ -56,19 +57,19 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     /** Monotonic source for publication stamps (orders writes/reloads so none regress a newer one). */
     private final AtomicLong stampGen = new AtomicLong();
 
-    /** Creates a manager with the given options and registers it in {@link Refs}. */
-    public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CacheOptions options) {
+    /** Creates a manager with the given options and registers it in {@code registry}. */
+    public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CacheOptions options, RefRegistry registry) {
         this.repository = storage.repository(descriptor);
         this.type       = descriptor.type();
         this.keyOf      = descriptor.keyExtractor();
         this.options    = options;
         this.store      = new LruCacheStore<>(options.maxSize());
-        Refs.register(type, this);
+        registry.register(type, this);
     }
 
     /** Convenience: unbounded cache with the given default policy. */
-    public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CachePolicy policy) {
-        this(descriptor, storage, CacheOptions.of(policy));
+    public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CachePolicy policy, RefRegistry registry) {
+        this(descriptor, storage, CacheOptions.of(policy), registry);
     }
 
     public Repository<K, V> getRepository() {

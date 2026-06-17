@@ -8,7 +8,7 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * Resolves a key into its entity, with caching. Implemented by {@link CachingManager} and looked up
- * by a {@link Ref} through the {@link Refs} registry (keyed by the entity type).
+ * by a {@link Ref} through its {@link RefRegistry} (keyed by the entity type).
  *
  * <p>The contract is expressed at the <b>cell</b> level: {@link #peekCell}/{@link #resolveCell}
  * return the live {@link CacheEntry} for a key. A {@code Ref} memoizes that cell so subsequent

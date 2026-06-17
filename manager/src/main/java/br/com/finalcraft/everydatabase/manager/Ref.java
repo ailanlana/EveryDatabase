@@ -17,12 +17,25 @@ import java.util.concurrent.CompletableFuture;
  * at deserialization time, so the JSON stays clean.
  *
  * <p>Resolution is always explicit and goes through the entity type's {@link RefResolver}
- * (its manager) found in the {@link Refs} registry - so caching, TTL and the identity map all
- * live in the manager, and the {@code Ref} stays a thin pointer:
+ * (its manager) found in a {@link RefRegistry} - so caching, TTL and the identity map all live
+ * in the manager, and the {@code Ref} stays a thin pointer:
  * <ul>
  *   <li>{@link #peek()} - synchronous, cache-only (no I/O). The hot-loop path.</li>
  *   <li>{@link #resolve()} - asynchronous: cache hit, or load-and-cache on miss.</li>
  * </ul>
+ *
+ * <h3>Binding</h3>
+ * A {@code Ref} resolves only against the {@link RefRegistry} it is <b>bound</b> to. The binding
+ * is set where the reference enters Java:
+ * <ul>
+ *   <li>deserialized from an entity - the ref-aware codec ({@link RefRegistry#codec(Class)}) binds
+ *       its registry to every {@code Ref} it reads;</li>
+ *   <li>built programmatically to resolve - use {@link RefRegistry#ref(Object, Class)} (or
+ *       {@code Ref.of(key, type, registry)}).</li>
+ * </ul>
+ * A bare {@link #of(Object, Class)} is <b>unbound</b>: perfectly fine to build and store (only the
+ * key is serialized), but calling {@link #peek()}/{@link #resolve()} on it fails fast with a clear
+ * message rather than guessing a resolver - there is no global registry to fall back to.
  *
  * <p>An optional per-reference {@link CachePolicy} override (typically declared with
  * {@code @RefPolicy}) changes only this reference's freshness verdict; the cached value stays
@@ -35,6 +48,8 @@ public final class Ref<K, V> {
 
     private final K key;
     private final Class<V> type;
+    /** The registry this reference resolves against; {@code null} when unbound. */
+    private final RefRegistry registry;
     /** Nullable: when null, the manager's default policy is used. */
     private final CachePolicy policyOverride;
     /** Memoized live cache cell (runtime only; never serialized). Enables lock-free reads. */
@@ -42,9 +57,10 @@ public final class Ref<K, V> {
     /** Memoized effective policy: the override, or the manager default once the resolver is known. */
     private transient volatile CachePolicy effectivePolicy;
 
-    private Ref(K key, Class<V> type, CachePolicy policyOverride) {
+    private Ref(K key, Class<V> type, RefRegistry registry, CachePolicy policyOverride) {
         this.type = Objects.requireNonNull(type, "type");
         this.key = key;
+        this.registry = registry;
         this.policyOverride = policyOverride;
     }
 
@@ -52,28 +68,42 @@ public final class Ref<K, V> {
     //  Factories
     // ------------------------------------------------------------------
 
-    /** A reference to {@code key} of type {@code type}, using the manager's default policy. */
+    /**
+     * An <b>unbound</b> reference to {@code key} of type {@code type}. Safe to build and store (it
+     * serializes as just the key); to resolve it, bind a registry - {@link #of(Object, Class, RefRegistry)},
+     * {@link RefRegistry#ref(Object, Class)}, or read it back through a {@link RefRegistry#codec(Class)}.
+     */
     public static <K, V> Ref<K, V> of(K key, Class<V> type) {
-        return new Ref<>(key, type, null);
+        return new Ref<>(key, type, null, null);
     }
 
-    /** A reference with a per-reference freshness override. */
-    public static <K, V> Ref<K, V> of(K key, Class<V> type, CachePolicy policyOverride) {
-        return new Ref<>(key, type, policyOverride);
+    /** A reference bound to {@code registry}, using the manager's default policy. */
+    public static <K, V> Ref<K, V> of(K key, Class<V> type, RefRegistry registry) {
+        return new Ref<>(key, type, registry, null);
     }
 
-    /** An empty reference (no target). {@link #peek()}/{@link #resolve()} yield empty. */
+    /** An unbound empty reference (no target). {@link #peek()}/{@link #resolve()} yield empty. */
     public static <K, V> Ref<K, V> empty(Class<V> type) {
-        return new Ref<>(null, type, null);
+        return new Ref<>(null, type, null, null);
+    }
+
+    /** An empty reference bound to {@code registry}. */
+    public static <K, V> Ref<K, V> empty(Class<V> type, RefRegistry registry) {
+        return new Ref<>(null, type, registry, null);
     }
 
     // ------------------------------------------------------------------
     //  Derivations (Ref is immutable)
     // ------------------------------------------------------------------
 
+    /** Returns a copy bound to the given registry. */
+    public Ref<K, V> withRegistry(RefRegistry registry) {
+        return new Ref<>(key, type, registry, policyOverride);
+    }
+
     /** Returns a copy carrying the given per-reference policy override. */
     public Ref<K, V> withPolicy(CachePolicy policyOverride) {
-        return new Ref<>(key, type, policyOverride);
+        return new Ref<>(key, type, registry, policyOverride);
     }
 
     /** Convenience: {@link #withPolicy(CachePolicy)} with {@link CachePolicy#ttl(Duration)}. */
@@ -91,6 +121,11 @@ public final class Ref<K, V> {
 
     public Class<V> type() {
         return type;
+    }
+
+    /** The registry this reference resolves against, if bound. */
+    public Optional<RefRegistry> registry() {
+        return Optional.ofNullable(registry);
     }
 
     public Optional<CachePolicy> policyOverride() {
@@ -138,9 +173,12 @@ public final class Ref<K, V> {
         if (memo != null && !memo.isEvicted() && !memo.isDeleted() && eff != null && eff.isFresh(memo)) {
             return CompletableFuture.completedFuture(Optional.of(memo.getValue())); // lock-free fast path
         }
-        RefResolver<K, V> resolver = Refs.resolver(type);
-        if (resolver == null) {
+        if (registry == null) {
             // Async contract: surface a wiring error through the future, not a synchronous throw.
+            return failedFuture(unbound());
+        }
+        RefResolver<K, V> resolver = registry.resolver(type);
+        if (resolver == null) {
             return failedFuture(noResolver());
         }
         return resolver.resolveCell(key, effectivePolicy(resolver)).thenApply(got -> {
@@ -159,7 +197,10 @@ public final class Ref<K, V> {
     }
 
     private RefResolver<K, V> resolver() {
-        RefResolver<K, V> resolver = Refs.resolver(type);
+        if (registry == null) {
+            throw unbound();
+        }
+        RefResolver<K, V> resolver = registry.resolver(type);
         if (resolver == null) {
             throw noResolver();
         }
@@ -176,9 +217,15 @@ public final class Ref<K, V> {
         return eff;
     }
 
+    private IllegalStateException unbound() {
+        return new IllegalStateException("Ref to " + type.getName() + " is not bound to a RefRegistry"
+                + " - read it through a RefRegistry.codec(...) codec, or build it with"
+                + " RefRegistry.ref(key, type) / Ref.of(key, type, registry).");
+    }
+
     private IllegalStateException noResolver() {
         return new IllegalStateException("No RefResolver registered for " + type.getName()
-                + " - create its manager (CachingManager) before resolving this Ref.");
+                + " in this RefRegistry - create its manager (CachingManager) before resolving this Ref.");
     }
 
     private static <T> CompletableFuture<T> failedFuture(Throwable ex) {

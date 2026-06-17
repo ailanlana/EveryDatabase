@@ -2,6 +2,7 @@ package br.com.finalcraft.everydatabase.manager.jackson;
 
 import br.com.finalcraft.everydatabase.manager.Ref;
 import br.com.finalcraft.everydatabase.manager.RefPolicy;
+import br.com.finalcraft.everydatabase.manager.RefRegistry;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.BeanProperty;
@@ -22,20 +23,23 @@ import java.time.Duration;
  * <p>The referenced type {@code V} (and the key type {@code K}) are not in the JSON - they are
  * captured from the field's generic declaration via {@link ContextualDeserializer}. A
  * {@link RefPolicy} annotation on the same field, if present, is baked into the {@code Ref} as
- * a per-reference freshness override.
+ * a per-reference freshness override. Every {@code Ref} produced is bound to the {@link RefRegistry}
+ * this deserializer was created with, so the ref resolves against that registry's managers.
  */
 @SuppressWarnings("rawtypes")
 public final class RefDeserializer extends JsonDeserializer<Ref> implements ContextualDeserializer {
 
+    private final RefRegistry registry;
     private final JavaType keyType;
     private final JavaType valueType;
     private final CachePolicy override;
 
-    public RefDeserializer() {
-        this(null, null, null);
+    public RefDeserializer(RefRegistry registry) {
+        this(registry, null, null, null);
     }
 
-    private RefDeserializer(JavaType keyType, JavaType valueType, CachePolicy override) {
+    private RefDeserializer(RefRegistry registry, JavaType keyType, JavaType valueType, CachePolicy override) {
+        this.registry = registry;
         this.keyType = keyType;
         this.valueType = valueType;
         this.override = override;
@@ -55,7 +59,7 @@ public final class RefDeserializer extends JsonDeserializer<Ref> implements Cont
             return this;
         }
         CachePolicy refOverride = (property != null) ? policyOf(findRefPolicy(property)) : null;
-        return new RefDeserializer(refType.containedType(0), refType.containedType(1), refOverride);
+        return new RefDeserializer(registry, refType.containedType(0), refType.containedType(1), refOverride);
     }
 
     /** Returns {@code candidate} iff it is a {@code Ref<K, V>} with both type parameters resolved. */
@@ -75,13 +79,14 @@ public final class RefDeserializer extends JsonDeserializer<Ref> implements Cont
                     + "A raw or wildcard Ref is unsupported.");
         }
         Object key = ctxt.readValue(p, keyType);
-        return Ref.of(key, valueType.getRawClass(), override);
+        Ref ref = Ref.of(key, valueType.getRawClass(), registry);
+        return override != null ? ref.withPolicy(override) : ref;
     }
 
     @Override
     public Ref getNullValue(DeserializationContext ctxt) {
         // A JSON null round-trips to an empty Ref (never a bare null), so callers never NPE.
-        return valueType != null ? Ref.empty(valueType.getRawClass()) : null;
+        return valueType != null ? Ref.empty(valueType.getRawClass(), registry) : null;
     }
 
     /**

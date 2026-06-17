@@ -6,7 +6,6 @@ import br.com.finalcraft.everydatabase.codec.JacksonJsonCodec;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
 import br.com.finalcraft.everydatabase.manager.testdata.Guild;
 import br.com.finalcraft.everydatabase.manager.testdata.GuildBattleData;
-import br.com.finalcraft.everydatabase.manager.jackson.RefCodecs;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,18 +20,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Nested references: each entity type resolves through its own manager and its own policy. */
 class NestedRefTest {
 
+    private RefRegistry registry;
     private InMemoryStorage storage;
 
     @BeforeEach
     void setUp() {
-        Refs.clear();
+        registry = new RefRegistry();
         storage = Storages.createInMemory();
         storage.init().join();
     }
 
     @AfterEach
     void tearDown() {
-        Refs.clear();
+        storage.close().join();
     }
 
     @Test
@@ -40,7 +40,7 @@ class NestedRefTest {
         EntityDescriptor<UUID, Guild> guildDesc = EntityDescriptor.builder(UUID.class, Guild.class)
                 .collection("guilds")
                 .keyExtractor(Guild::getId)
-                .codec(RefCodecs.json(Guild.class))                  // Guild has a Ref field
+                .codec(registry.codec(Guild.class))                  // Guild has a Ref field
                 .build();
 
         EntityDescriptor<UUID, GuildBattleData> battleDesc = EntityDescriptor.builder(UUID.class, GuildBattleData.class)
@@ -50,9 +50,9 @@ class NestedRefTest {
                 .build();
 
         // Two managers, two policies: guilds resident, battle data on a 3-minute TTL.
-        CachingManager<UUID, Guild> guilds = new CachingManager<>(guildDesc, storage, CachePolicy.always());
+        CachingManager<UUID, Guild> guilds = new CachingManager<>(guildDesc, storage, CachePolicy.always(), registry);
         CachingManager<UUID, GuildBattleData> battle =
-                new CachingManager<>(battleDesc, storage, CachePolicy.ttl(Duration.ofMinutes(3)));
+                new CachingManager<>(battleDesc, storage, CachePolicy.ttl(Duration.ofMinutes(3)), registry);
 
         UUID gid = UUID.randomUUID();
         UUID bid = UUID.randomUUID();

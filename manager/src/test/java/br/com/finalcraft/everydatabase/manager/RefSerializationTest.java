@@ -19,7 +19,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** A Ref serializes as its key; the target type is recovered from the field on read. */
 class RefSerializationTest {
 
-    private final ObjectMapper mapper = RefCodecs.newMapper();
+    private final RefRegistry registry = new RefRegistry();
+    private final ObjectMapper mapper = RefCodecs.newMapper(registry);
 
     @Test
     void ref_serializes_as_its_key_not_an_embedded_object() throws Exception {
