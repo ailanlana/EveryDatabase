@@ -41,3 +41,4 @@ localfilestorage/*
 # Local-only, intentionally not committed
 /CLAUDE.md
 /specs/
+/wiki/
