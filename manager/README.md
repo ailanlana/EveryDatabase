@@ -63,8 +63,8 @@ repositories {
 }
 
 dependencies {
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.1'
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.2'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.2'
 }
 ```
 
@@ -74,12 +74,12 @@ dependencies {
 <dependency>
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <artifactId>everydatabase-manager</artifactId>
-  <version>1.0.1</version>
+  <version>1.0.2</version>
 </dependency>
 <dependency>
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <artifactId>everydatabase-core</artifactId>
-  <version>1.0.1</version>
+  <version>1.0.2</version>
 </dependency>
 ```
 

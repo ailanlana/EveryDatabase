@@ -7,7 +7,7 @@ subprojects {
     apply plugin: 'maven-publish'
 
     group = 'br.com.finalcraft.everydatabase'
-    version = '1.0.1'
+    version = '1.0.2'
 
     java {
         withSourcesJar()
