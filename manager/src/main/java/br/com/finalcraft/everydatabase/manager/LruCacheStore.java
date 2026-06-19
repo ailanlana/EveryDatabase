@@ -138,21 +138,6 @@ final class LruCacheStore<K, V> {
         }
     }
 
-    /**
-     * Atomically replaces the mapping only if it is still {@code expected} (by identity), and
-     * returns whether it did. Lets a stale reload overwrite exactly the entry it judged stale,
-     * without clobbering a concurrent authoritative write.
-     */
-    boolean replaceIfSame(K key, CacheEntry<V> expected, CacheEntry<V> candidate) {
-        synchronized (lock) {
-            if (map.get(key) == expected) {
-                map.put(key, candidate);
-                return true;
-            }
-            return false;
-        }
-    }
-
     /** Atomically marks the current entry (if any) stale, under the lock (no detached-entry race). */
     void markStale(K key) {
         synchronized (lock) {

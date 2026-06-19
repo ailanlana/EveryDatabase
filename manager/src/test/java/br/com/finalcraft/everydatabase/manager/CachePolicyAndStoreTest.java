@@ -107,20 +107,6 @@ class CachePolicyAndStoreTest {
     }
 
     @Test
-    void replaceIfSame_only_replaces_a_matching_entry() {
-        LruCacheStore<String, String> store = new LruCacheStore<>(0);
-        CacheEntry<String> a = new CacheEntry<>("a");
-        CacheEntry<String> b = new CacheEntry<>("b");
-        CacheEntry<String> c = new CacheEntry<>("c");
-        store.put("k", a);
-
-        assertTrue(store.replaceIfSame("k", a, b));   // a is current -> replaced
-        assertSame(b, store.get("k"));
-        assertFalse(store.replaceIfSame("k", a, c));  // a no longer current -> no-op
-        assertSame(b, store.get("k"));
-    }
-
-    @Test
     void markStale_marks_the_current_entry() {
         LruCacheStore<String, String> store = new LruCacheStore<>(0);
         CacheEntry<String> entry = new CacheEntry<>("v");
