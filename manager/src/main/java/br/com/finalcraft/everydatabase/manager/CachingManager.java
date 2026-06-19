@@ -6,6 +6,9 @@ import br.com.finalcraft.everydatabase.Storage;
 import br.com.finalcraft.everydatabase.manager.cache.CacheEntry;
 import br.com.finalcraft.everydatabase.manager.cache.CacheOptions;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
+import br.com.finalcraft.everydatabase.manager.cache.DirtyAccessor;
+import br.com.finalcraft.everydatabase.manager.cache.DirtyFlag;
+import br.com.finalcraft.everydatabase.manager.cache.IDirtyable;
 import br.com.finalcraft.everydatabase.versioned.OptimisticLockException;
 
 import java.util.ArrayList;
@@ -44,6 +47,14 @@ import java.util.function.Function;
  * behind the backend). Cross-process writes are invisible here - bound their staleness with a
  * TTL policy and/or wire an external signal to {@link #invalidate(Object)}/{@link #evict(Object)}.
  *
+ * <h3>Write-back</h3>
+ * When a cached value is dirty-trackable - it implements {@link IDirtyable} or carries a
+ * {@link DirtyFlag @DirtyFlag} field - the manager supports a mutate-in-memory / flush-later flow: a
+ * dirty cell is always served and never reloaded over (so unsaved changes are never lost to a
+ * reload), {@link #seedIfAbsent(Object, Object)} caches a not-yet-persisted default, and
+ * {@link #flushDirty()} / {@link #saveAllAndCache(Collection)} persist the dirty set in a batch.
+ * Plain entities are unaffected.
+ *
  * @param <K> the key type
  * @param <V> the entity type
  */
@@ -53,14 +64,17 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     protected final Class<V> type;
     protected final Function<V, K> keyOf;
     protected final CacheOptions options;
-    private final LruCacheStore<K, V> store;
+    protected final LruCacheStore<K, V> store;
     /** Monotonic source for publication stamps (orders writes/reloads so none regress a newer one). */
-    private final AtomicLong stampGen = new AtomicLong();
+    protected final AtomicLong stampGen = new AtomicLong();
+    /** Dirty-tracking accessor for the entity type (write-back), or {@code null} when not trackable. */
+    private final DirtyAccessor dirtyAccessor;
 
     /** Creates a manager with the given options and registers it in {@code registry}. */
     public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CacheOptions options, RefRegistry registry) {
         this.repository = storage.repository(descriptor);
         this.type       = descriptor.type();
+        this.dirtyAccessor = DirtyAccessor.forType(type);
         this.keyOf      = descriptor.keyExtractor();
         this.options    = options;
         this.store      = new LruCacheStore<>(options.maxSize());
@@ -70,6 +84,20 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     /** Convenience: unbounded cache with the given default policy. */
     public CachingManager(EntityDescriptor<K, V> descriptor, Storage storage, CachePolicy policy, RefRegistry registry) {
         this(descriptor, storage, CacheOptions.of(policy), registry);
+    }
+
+    /**
+     * Package-visible: wire a manager directly over a {@code repository}, without going through a
+     * {@link Storage} or registering in a {@link RefRegistry} (so no ref resolution). For tests and
+     * advanced composition.
+     */
+    protected CachingManager(Repository<K, V> repository, Class<V> type, Function<V, K> keyOf, CacheOptions options) {
+        this.repository = repository;
+        this.type       = type;
+        this.dirtyAccessor = DirtyAccessor.forType(type);
+        this.keyOf      = keyOf;
+        this.options    = options;
+        this.store      = new LruCacheStore<>(options.maxSize());
     }
 
     public Repository<K, V> getRepository() {
@@ -117,9 +145,21 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         });
     }
 
-    /** A cell is serveable when it is present, live (not a tombstone), not evicted, and fresh. */
-    private static boolean serveable(CacheEntry<?> cell, CachePolicy policy) {
-        return cell != null && !cell.isEvicted() && !cell.isDeleted() && policy.isFresh(cell);
+    /**
+     * A cell is serveable when it is present, live (not a tombstone), not evicted, and either fresh
+     * or {@linkplain IDirtyable#isDirty() dirty}: a write-back cell with unsaved local changes is
+     * always served and never reloaded over, so the freshness policy can't overwrite them.
+     */
+    private boolean serveable(CacheEntry<?> cell, CachePolicy policy) {
+        if (cell == null || cell.isEvicted() || cell.isDeleted()) {
+            return false;
+        }
+        return isDirty(cell) || policy.isFresh(cell);
+    }
+
+    /** Whether the cell holds a dirty-trackable value reporting unsaved local changes. */
+    private boolean isDirty(CacheEntry<?> cell) {
+        return dirtyAccessor != null && cell.getValue() != null && dirtyAccessor.isDirty(cell.getValue());
     }
 
     /**
@@ -237,6 +277,131 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         });
     }
 
+    // ------------------------------------------------------------------
+    //  Write-back (dirty tracking: mutate in memory, flush in a batch)
+    // ------------------------------------------------------------------
+
+    /**
+     * Installs {@code value} as the live cached instance for {@code key} <b>without persisting it</b>,
+     * but only when no live instance is already cached; returns the instance now resident (the
+     * pre-existing one if a concurrent caller won, otherwise {@code value}).
+     *
+     * <p>The write-back counterpart of a lazy default: a freshly created entity becomes the canonical
+     * cached instance (so repeated reads return the same object and accumulate mutations) before it
+     * exists in the backend, to be persisted later by {@link #flushDirty()} /
+     * {@link #saveAllAndCache(Collection)} / {@link #saveAndCache(Object)}. Unlike {@code saveAndCache}
+     * it performs no I/O. An older delete tombstone is resurrected.
+     */
+    public V seedIfAbsent(K key, V value) {
+        return store.installColdMiss(key, value, stampGen.incrementAndGet()).getValue();
+    }
+
+    /**
+     * Batch write-through: persists every entity via {@link Repository#saveAll} and updates each
+     * cached cell in place - the bulk counterpart of {@link #saveAndCache(Object)}. If the batch
+     * fails as a unit it is retried entity by entity, so one bad record never loses the rest, and the
+     * per-entity failures are collected into the returned {@link BatchSaveReport}. An
+     * {@link OptimisticLockException} on an entity evicts its (stale) cell so the next read reloads
+     * the backend; any other error leaves the cell untouched. The future completes normally - inspect
+     * the report.
+     */
+    public CompletableFuture<BatchSaveReport<K>> saveAllAndCache(Collection<V> values) {
+        List<V> entities = new ArrayList<>(values);
+        if (entities.isEmpty()) {
+            return CompletableFuture.completedFuture(BatchSaveReport.<K>empty());
+        }
+        return repository.saveAll(entities).handle((ignored, batchError) -> {
+            if (batchError == null) {
+                if (options.policy().cacheable()) {
+                    for (V value : entities) {
+                        updateInPlace(keyOf.apply(value), value, stampGen.incrementAndGet());
+                    }
+                }
+                return CompletableFuture.completedFuture(BatchSaveReport.<K>empty());
+            }
+            List<CompletableFuture<KeyOutcome<K>>> singles = new ArrayList<>(entities.size());
+            for (V value : entities) {
+                singles.add(saveOneAndCache(value));
+            }
+            return CompletableFuture.allOf(singles.toArray(new CompletableFuture[0]))
+                    .thenApply(done -> BatchSaveReport.of(joinAll(singles)));
+        }).thenCompose(future -> future);
+    }
+
+    private CompletableFuture<KeyOutcome<K>> saveOneAndCache(V value) {
+        final K key = keyOf.apply(value);
+        final long stamp = stampGen.incrementAndGet();
+        return repository.save(value).handle((ignored, error) -> {
+            if (error == null) {
+                if (options.policy().cacheable()) {
+                    updateInPlace(key, value, stamp);
+                }
+                return new KeyOutcome<>(key, KeyOutcome.Status.SAVED, null);
+            }
+            if (isOptimisticLock(error)) {
+                store.remove(key);   // stale cached write -> drop it so the next read reloads
+                return new KeyOutcome<>(key, KeyOutcome.Status.CONFLICT, unwrap(error));
+            }
+            return new KeyOutcome<>(key, KeyOutcome.Status.ERROR, unwrap(error));
+        });
+    }
+
+    /**
+     * Write-back flush: collects every cached cell whose value is dirty-trackable and reporting dirty,
+     * {@linkplain IDirtyable#markClean() clears} its flag, and persists them via
+     * {@link #saveAllAndCache(Collection)}. A transient (non-conflict) failure
+     * {@linkplain IDirtyable#markDirty() re-marks} the entity dirty so the next flush retries it; a
+     * conflicting entity is evicted (re-read on next access). Returns the {@link BatchSaveReport} of
+     * the failures - empty when the flush was clean or nothing was dirty.
+     *
+     * <p>A value re-dirtied by another thread <em>during</em> the flush re-sets its own flag, so it is
+     * simply picked up by the next flush: a flush is at-least-once, never lossy.
+     */
+    public CompletableFuture<BatchSaveReport<K>> flushDirty() {
+        List<V> dirty = new ArrayList<>();
+        for (CacheEntry<V> cell : store.valuesSnapshot()) {
+            V value = cell.getValue();
+            if (!cell.isDeleted() && value != null && dirtyAccessor != null && dirtyAccessor.isDirty(value)) {
+                dirtyAccessor.markClean(value);   // clear before persisting; a concurrent change re-sets it
+                dirty.add(value);
+            }
+        }
+        if (dirty.isEmpty()) {
+            return CompletableFuture.completedFuture(BatchSaveReport.<K>empty());
+        }
+        return saveAllAndCache(dirty).thenApply(report -> {
+            for (KeyOutcome<K> failure : report.failures()) {
+                if (failure.status() == KeyOutcome.Status.ERROR) {
+                    CacheEntry<V> cell = store.get(failure.key());
+                    if (cell != null && cell.getValue() != null && dirtyAccessor != null) {
+                        dirtyAccessor.markDirty(cell.getValue());   // transient: retry on the next flush
+                    }
+                }
+                // CONFLICT cells were already evicted by saveAllAndCache - dropped on purpose (reload on read)
+            }
+            return report;
+        });
+    }
+
+    private static <K> List<KeyOutcome<K>> joinAll(List<CompletableFuture<KeyOutcome<K>>> singles) {
+        List<KeyOutcome<K>> outcomes = new ArrayList<>(singles.size());
+        for (CompletableFuture<KeyOutcome<K>> single : singles) {
+            outcomes.add(single.join());   // each completes normally (saveOneAndCache never rethrows)
+        }
+        return outcomes;
+    }
+
+    /** Unwraps {@link CompletableFuture} wrappers to the underlying cause, for the report. */
+    private static Throwable unwrap(Throwable error) {
+        Throwable cause = error;
+        while ((cause instanceof java.util.concurrent.CompletionException
+                || cause instanceof java.util.concurrent.ExecutionException)
+                && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        return cause;
+    }
+
     /** Marks a cached entry stale (atomically, under the store lock): the next read reloads it. */
     public void invalidate(K key) {
         store.markStale(key);
@@ -287,6 +452,20 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     /** Current number of <b>live</b> cached entries (tombstones from deletes are not counted). */
     public int cachedSize() {
         return store.liveCount();
+    }
+
+    /**
+     * A snapshot of the currently cached <b>live</b> values (tombstones excluded) - for bulk
+     * iteration over what the cache holds (e.g. scanning or flushing a resident working set).
+     */
+    public List<V> cachedValues() {
+        List<V> values = new ArrayList<>();
+        for (CacheEntry<V> entry : store.valuesSnapshot()) {
+            if (!entry.isDeleted()) {
+                values.add(entry.getValue());
+            }
+        }
+        return values;
     }
 
     /** Unwraps {@link CompletableFuture}/reflection wrappers to detect an optimistic-lock failure. */

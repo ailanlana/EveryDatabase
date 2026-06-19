@@ -9,7 +9,7 @@ A backend-agnostic persistence layer for the JVM. Write your data-access code **
 ![Runtime](https://img.shields.io/badge/runtime-Java%208%2B-blue)
 ![Build](https://img.shields.io/badge/build-JDK%2025-orange)
 ![Backends](https://img.shields.io/badge/backends-SQL%20%7C%20Mongo%20%7C%20File%20%7C%20Memory-green)
-![Version](https://img.shields.io/badge/version-1.0.2-informational)
+![Version](https://img.shields.io/badge/version-1.0.3-informational)
 
 </div>
 
@@ -81,10 +81,10 @@ repositories {
 dependencies {
     // RECOMMENDED — everything included by default (HikariCP, Jackson, Mongo driver, H2,
     // MySQL + PostgreSQL JDBC drivers); override any version via normal dependency management:
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.2'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.3'
 
     // OR runtime download — your jar stays tiny, the same set is downloaded at runtime via Libby:
-    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.0.2'
+    //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.0.3'
 }
 ```
 
@@ -92,13 +92,13 @@ Nothing else to add — every backend works out of the box. To **change a versio
 
 ```groovy
 dependencies {
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.2'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.3'
 
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'   // upgrade Jackson
     runtimeOnly    'com.mysql:mysql-connector-j:8.4.0!!'                  // force-downgrade the MySQL driver
 
     // Only target SQL? Drop the Mongo driver entirely:
-    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.0.2') {
+    // implementation('br.com.finalcraft.everydatabase:everydatabase-core:1.0.3') {
     //     exclude group: 'org.mongodb'
     // }
 }
@@ -118,7 +118,7 @@ dependencies {
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <!-- or everydatabase-libby -->
   <artifactId>everydatabase-core</artifactId>
-  <version>1.0.2</version>
+  <version>1.0.3</version>
 </dependency>
 ```
 
@@ -611,8 +611,8 @@ An **optional add-on module** that sits *in front of* the core: hold a **typed r
 
 ```groovy
 // the manager add-on does NOT pull core in transitively — declare both explicitly:
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.2'
-implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.2'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.3'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.3'
 ```
 
 ```java
@@ -634,8 +634,9 @@ p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-a
 
 - **Typed refs that serialize as the key** — no embedded objects, no ORM; the target type is recovered from the field on read.
 - **Caching with a policy you own** — `always()` / `ttl(...)` / `noCache()`, a per-field `@RefPolicy` override, and an LRU `maxSize`. `peek()` is a lock-free, cache-only read; `resolve()` loads on a miss; `getAll(...)` batches (the N+1 antidote); `saveAndCache` / `deleteAndEvict` keep cache and backend consistent.
+- **Write-back when you want it** — opt-in dirty-trackable entities (implement `IDirtyable` or annotate a `boolean` field with `@DirtyFlag`) mutate in memory and flush in a batch (`flushDirty()`); a dirty value is never reloaded over, and `seedIfAbsent(...)` caches a not-yet-persisted default.
 - **Cross-backend by design** — because a reference resolves through its type's manager, a single root entity can fan out across MySQL, PostgreSQL, Mongo, H2, files and memory **at once**, each reference under its own key type.
-- **Per-context registries, no global state** — each `RefRegistry` is its own isolated context; two of them can register a manager for the **same** type backed by different storages without colliding, so independent plugins never interfere.
+- **Per-context registries, no global state** — each `RefRegistry` is its own isolated context; two of them can register a manager for the **same** type backed by different storages without colliding, so independent plugins never interfere. Registries can also chain to a **parent**, composing a private-then-shared lookup (a plugin's own registry falling back to a shared one).
 
 **→ Full guide: [`manager/README.md`](manager/README.md).**
 

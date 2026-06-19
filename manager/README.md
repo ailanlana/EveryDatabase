@@ -23,9 +23,11 @@ you control, and resolve them lazily — without turning the library into an ORM
 - [Freshness vs capacity](#freshness-vs-capacity)
 - [Per-reference policy (`@RefPolicy`)](#per-reference-policy-refpolicy)
 - [Writing & deleting through the cache](#writing--deleting-through-the-cache)
+- [Write-back](#write-back)
 - [Nested references](#nested-references)
 - [⭐ One entity, many databases, many key types](#-one-entity-many-databases-many-key-types)
 - [Multiple registries — the same type, different resolvers](#multiple-registries--the-same-type-different-resolvers)
+- [Parent registries](#parent-registries)
 - [What it guarantees (and what it doesn't)](#what-it-guarantees-and-what-it-doesnt)
 - [Non-goals](#non-goals)
 
@@ -63,8 +65,8 @@ repositories {
 }
 
 dependencies {
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.2'
-    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.2'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.3'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.3'
 }
 ```
 
@@ -74,12 +76,12 @@ dependencies {
 <dependency>
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <artifactId>everydatabase-manager</artifactId>
-  <version>1.0.2</version>
+  <version>1.0.3</version>
 </dependency>
 <dependency>
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <artifactId>everydatabase-core</artifactId>
-  <version>1.0.2</version>
+  <version>1.0.3</version>
 </dependency>
 ```
 
@@ -128,6 +130,7 @@ p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-a
 | **`CachePolicy`** | Freshness strategy: `always()`, `ttl(Duration)`, `noCache()`. Per-reference overridable. |
 | **`CacheOptions`** | Store-level config: default `CachePolicy` + `maxSize` (LRU bound). |
 | **`@RefPolicy`** | Per-field freshness override declared right on a `Ref` field. |
+| **`IDirtyable` / `@DirtyFlag`** | Two opt-in forms for mutate-in-memory / flush-later entities (implement the interface **or** annotate a `boolean` field): a dirty cell is never reloaded over, and `flushDirty()` persists the dirty set in one batch. |
 | **`RefCodecs`** | Builds a ref-aware Jackson codec bound to a registry (`registry.codec(Type.class)`, delegating to `RefCodecs.json(Type.class, registry)`). |
 
 The naming reflects the split: the **`Ref*`** family is *the reference*; the **`Cache*`** family is
@@ -196,8 +199,11 @@ Surface:
 | `preloadAll()` | mirror the whole collection into the cache (a small hot set) |
 | `saveAndCache(value)` | write-through: persist **and** update the cell |
 | `deleteAndEvict(key)` | delete from the backend **and** evict the cell |
+| `seedIfAbsent(key, value)` | cache a not-yet-persisted instance (write-back lazy default), no I/O |
+| `saveAllAndCache(values)` / `flushDirty()` | batch write-through / flush dirty (write-back) cells (see [Write-back](#write-back)) |
 | `invalidate(key)` / `evict(key)` / `invalidateAll()` / `clearCache()` | invalidation knobs |
 | `purgeExpired()` | drop entries the policy no longer considers fresh (release memory) |
+| `cachedValues()` / `cachedSize()` | snapshot the live cached values / count them (for bulk iteration) |
 | `repository()` | the underlying uncached `Repository` (queries, cache-bypassing reads) |
 
 ---
@@ -264,6 +270,80 @@ guilds.deleteAndEvict(id).join();      // delete + evict (a tombstone blocks rac
 Both are stamp-ordered: a slower in-flight reload can neither clobber a newer `saveAndCache` nor
 resurrect a newer `deleteAndEvict`. On an `OptimisticLockException`, `saveAndCache` auto-evicts the
 stale entry so the next read reloads.
+
+---
+
+## Write-back
+
+By default the cache is read-through + write-through (`saveAndCache` persists immediately). Some
+workloads want the opposite: mutate the cached instance many times in memory, then flush the dirty
+set in one batch (a periodic tick, a logout, a shutdown). Opt in **one of two ways** (pick one, never
+both) - the same alternative split as `Versioned` vs `@OptimisticLock` for locking:
+
+**1. Implement `IDirtyable`** - explicit three-method contract:
+
+```java
+public class Account implements IDirtyable {
+    private UUID id;
+    private long balance;
+
+    @JsonIgnore private transient boolean dirty;   // the flag is never persisted
+
+    public void deposit(long n) { balance += n; markDirty(); }
+
+    public boolean isDirty() { return dirty; }
+    public void markClean()  { dirty = false; }
+    public void markDirty()  { dirty = true; }
+}
+```
+
+**2. Annotate a `boolean` field with `@DirtyFlag`** - no interface; the manager reads/clears/re-sets
+the field by reflection. Your own mutations set it `true`:
+
+```java
+public class Account {
+    private UUID id;
+    private long balance;
+
+    @DirtyFlag @JsonIgnore
+    private transient boolean dirty;               // the flag is never persisted
+
+    public void deposit(long n) { balance += n; this.dirty = true; }
+}
+```
+
+The field must be `boolean`/`Boolean`, non-static, non-final, at most one per entity (a `Boolean`
+that is still `null` reads as not-dirty). Combining `@DirtyFlag` with `implements IDirtyable` throws.
+
+A dirty-trackable value changes three things in its manager:
+
+- **Dirty wins.** While `isDirty()` is `true` the cell is always served and **never reloaded over** -
+  not by a TTL, not by `invalidate(...)`. An unflushed local change can't be lost to a backend reload,
+  so a TTL policy is safe even on a mutable entity (once flushed and clean, the policy applies again).
+- **`seedIfAbsent(key, value)`** caches a freshly created instance **without writing it** - a lazy
+  default that becomes the canonical cached object (repeated reads return the same instance and
+  accumulate mutations), persisted only when it is flushed.
+- **`flushDirty()`** collects every dirty cell, persists them in one `saveAll`, and clears each flag.
+
+```java
+Account acc = accounts.seedIfAbsent(id, new Account(id, 0));  // cached, no I/O
+acc.deposit(100);                                             // dirty; never reloaded over
+// ...later, on a flush tick:
+BatchSaveReport<UUID> report = accounts.flushDirty().join();  // one batch write, flags cleared
+```
+
+`flushDirty()` (and the lower-level `saveAllAndCache(values)`) return a **`BatchSaveReport`** of the
+failures only - empty on a clean flush. A failed batch is retried entity by entity, so one bad record
+never loses the rest:
+
+- an **optimistic-lock conflict** evicts the stale cell (`report.conflictedKeys()`), so the next read
+  reloads the winning version;
+- any **other error** keeps the cell and re-marks it dirty (`report.erroredKeys()`), so the next flush
+  retries it.
+
+A flush is **at-least-once**: a value re-dirtied by another thread *during* the flush re-sets its own
+flag and is picked up next time, never lost. Entities that are neither `IDirtyable` nor
+`@DirtyFlag`-annotated keep the plain read-through / write-through behavior.
 
 ---
 
@@ -363,6 +443,36 @@ overwrite the first). A full two-subsystem example — `SurvivalProfile`/`LobbyP
 
 ---
 
+## Parent registries
+
+A registry can be created with a **parent**: `new RefRegistry(parent)`. Resolution then checks the
+registry itself first and falls back up the parent chain - so a subsystem keeps a **private** registry
+for its own entities while still resolving **shared** entities published in a common parent, with no
+process-wide global map:
+
+```java
+RefRegistry global = new RefRegistry();             // shared, framework-owned
+RefRegistry plugin = new RefRegistry(global);       // a plugin's own registry, child of global
+
+global.manager(PLAYERS, storage, CachePolicy.always());   // shared: published in the parent
+plugin.manager(JOBS,    storage, CachePolicy.always());   // private: local to the plugin
+
+plugin.resolver(Jobs.class);     // found locally
+plugin.resolver(Player.class);   // not local -> resolved via the parent (fallback)
+```
+
+A `Ref` bound to the child (by the child's codec) resolves through the same chain, so a plugin's
+entity can reference a shared one published in the parent. To expose an entity to other subsystems,
+register it in the shared parent; to keep it private, register it in your own registry. Registration is
+always local - `register(...)`/`manager(...)` never touch the parent. `isRegistered` is local;
+`isRegisteredInChain` walks the chain.
+
+> Keep the chain shallow (one parent: yours -> shared). A single shared parent is the cross-subsystem
+> bus; reach into another subsystem's registry directly only for the rare case it didn't publish what
+> you need.
+
+---
+
 ## What it guarantees (and what it doesn't)
 
 The cache hands out the **same instance** per key for its lifetime — an identity map. Publication is
@@ -383,9 +493,11 @@ invalidation signal wired to `manager.evict(key)`.
 
 ## Non-goals
 
-No eager fetch, no lazy proxies, no hidden I/O, no implicit joins, no entity-graph mapping, no dirty
-tracking. Resolution is always explicit (`peek`/`resolve`) and batchable (`getAll`). The cache is
-opt-in; freshness is a knob the caller owns.
+No eager fetch, no lazy proxies, no hidden I/O, no implicit joins, no entity-graph mapping, and no
+*automatic* dirty tracking - write-back is **opt-in** via `IDirtyable` or `@DirtyFlag`, off by
+default. Resolution is
+always explicit (`peek`/`resolve`) and batchable (`getAll`). The cache is opt-in; freshness is a knob
+the caller owns.
 
 <div align="center">
 

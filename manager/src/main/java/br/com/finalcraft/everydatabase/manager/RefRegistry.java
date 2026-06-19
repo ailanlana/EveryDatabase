@@ -42,13 +42,40 @@ import java.util.concurrent.ConcurrentHashMap;
  * CachingManager<UUID, Guild> guilds = refRegistry.manager(GUILDS, guildStorage, CachePolicy.always());
  * }</pre>
  *
+ * <h3>Parent chaining</h3>
+ * A registry may be created with a {@link #RefRegistry(RefRegistry) parent}: {@link #resolver(Class)}
+ * (and every {@link Ref} bound here) checks this registry first, then walks up the parent chain. This
+ * composes a private-then-shared lookup - a subsystem registers its own entities locally and still
+ * resolves shared entities published in a common parent - without a process-wide global map.
+ * Registration ({@link #register}) is always local to the registry it is called on.
+ *
  * <p>The map is a {@link ConcurrentHashMap}; registration and lookup are thread-safe.
  */
 public final class RefRegistry {
 
     private final Map<Class<?>, RefResolver<?, ?>> resolvers = new ConcurrentHashMap<>();
 
+    /** Fallback registry consulted when a type is not registered locally; {@code null} for a root. */
+    private final RefRegistry parent;
+
     public RefRegistry() {
+        this(null);
+    }
+
+    /**
+     * Creates a registry that falls back to {@code parent} when a type is not registered locally.
+     * Resolution checks this registry first, then walks up the parent chain - so a subsystem's own
+     * registry resolves its private entities while still seeing shared entities published in a
+     * common parent (e.g. a host framework's global registry). Registration is always local; a
+     * {@code null} parent makes this a root registry (the previous default).
+     */
+    public RefRegistry(RefRegistry parent) {
+        this.parent = parent;
+    }
+
+    /** The fallback registry consulted on a local miss, or {@code null} when this is a root. */
+    public RefRegistry parent() {
+        return parent;
     }
 
     // ------------------------------------------------------------------
@@ -69,19 +96,29 @@ public final class RefRegistry {
         resolvers.remove(type);
     }
 
-    /** Returns {@code true} when a resolver is registered for {@code type}. */
+    /** Returns {@code true} when a resolver is registered for {@code type} in <b>this</b> registry. */
     public boolean isRegistered(Class<?> type) {
         return resolvers.containsKey(type);
     }
 
+    /** Returns {@code true} when {@code type} is registered here or anywhere up the {@link #parent()} chain. */
+    public boolean isRegisteredInChain(Class<?> type) {
+        return resolvers.containsKey(type) || (parent != null && parent.isRegisteredInChain(type));
+    }
+
     /**
-     * Returns the resolver for {@code type}, or {@code null} when none is registered.
-     * The cast is safe: registration always pairs a {@code Class<V>} with a matching
+     * Returns the resolver for {@code type}: the local registration if present, otherwise the one
+     * resolved up the {@link #parent()} chain, or {@code null} when none is registered anywhere in
+     * the chain. The cast is safe: registration always pairs a {@code Class<V>} with a matching
      * {@code RefResolver<?, V>}.
      */
     @SuppressWarnings("unchecked")
     public <K, V> RefResolver<K, V> resolver(Class<V> type) {
-        return (RefResolver<K, V>) resolvers.get(type);
+        RefResolver<?, ?> local = resolvers.get(type);
+        if (local != null) {
+            return (RefResolver<K, V>) local;
+        }
+        return parent != null ? parent.<K, V>resolver(type) : null;
     }
 
     /** Clears every registration. Handy in tests, or to tear a context down. */
