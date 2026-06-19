@@ -7,6 +7,5 @@ pluginManagement {
 rootProject.name = 'EveryDatabase'
 
 include 'core'
-include 'standalone'
 include 'libby'
 include 'manager'

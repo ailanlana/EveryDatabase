@@ -52,8 +52,8 @@ dependencies {
     // ---- Published runtime dependencies: the "everything included by default" policy ----
     // everydatabase-core is the RECOMMENDED flavor: it works out of the box, and every
     // version below is overridable by the consumer (declare your own version of the same
-    // module, or exclude what you don't use). The other flavors repackage this exact set:
-    // :standalone shades+relocates it, :libby downloads it at runtime.
+    // module, or exclude what you don't use). The other flavor repackages this exact set:
+    // :libby downloads it at runtime.
 
     // Part of the public API surface: JacksonJsonCodec/JacksonYamlCodec accept an
     // ObjectMapper, IndexValueExtractor returns JsonNode, MongoMigration exposes

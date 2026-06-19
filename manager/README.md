@@ -50,8 +50,9 @@ makes the design composable — and what lets a reference cross backends transpa
 
 ## Install
 
-`everydatabase-manager` depends on `everydatabase-core` (the recommended flavor), so adding it pulls
-the full backend set transitively.
+`everydatabase-manager` is an **add-on that sits in front of** `everydatabase-core` (the recommended
+flavor). It does **not** pull core in transitively — declare **both** explicitly, so it stays obvious
+which artifact owns what:
 
 **Gradle**
 
@@ -63,6 +64,7 @@ repositories {
 
 dependencies {
     implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.1'
+    implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
 }
 ```
 
@@ -72,6 +74,11 @@ dependencies {
 <dependency>
   <groupId>br.com.finalcraft.everydatabase</groupId>
   <artifactId>everydatabase-manager</artifactId>
+  <version>1.0.1</version>
+</dependency>
+<dependency>
+  <groupId>br.com.finalcraft.everydatabase</groupId>
+  <artifactId>everydatabase-core</artifactId>
   <version>1.0.1</version>
 </dependency>
 ```

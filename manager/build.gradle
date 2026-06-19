@@ -13,11 +13,18 @@ base {
 // which lists :manager alongside :core and :libby.
 
 dependencies {
-    // api, not implementation: Ref/CachingManager expose :core types (Storage,
-    // Repository, EntityDescriptor) in their public signatures, and the Jackson
-    // RefModule extends com.fasterxml.jackson types - consumers compile against both.
-    api project(':core')
+    // compileOnly, NOT api: everydatabase-manager is an add-on that sits in front of
+    // everydatabase-core and exposes :core types (Storage, Repository, EntityDescriptor)
+    // in its public signatures. We deliberately keep :core OUT of the published POM so a
+    // consumer must declare BOTH everydatabase-manager AND everydatabase-core explicitly -
+    // letting core arrive transitively blurred which artifact owns what. Because the public
+    // API exposes core types, a consumer who forgets core fails fast at compile time.
+    compileOnly project(':core')
     api libs.jackson.databind
+
+    // compileOnly does not reach the test classpaths, so the tests depend on :core directly
+    // (its full runtime set - H2, etc. - arrives transitively, which the embedded suites need).
+    testImplementation project(':core')
 
     // JUnit 5 (compiles/runs on the Java 25 toolchain, like :core's tests)
     testImplementation libs.junit.jupiter.api

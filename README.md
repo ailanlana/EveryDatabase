@@ -68,7 +68,7 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 
 ## Install
 
-The library is published to a public Maven repository in **three flavors** — same code, same API, different packaging (see [Distribution flavors](#distribution-flavors)). Pick exactly one.
+The library is published to a public Maven repository in **two flavors** — same code, same API, different packaging (see [Distribution flavors](#distribution-flavors)). Pick exactly one.
 
 **Gradle**
 
@@ -82,10 +82,6 @@ dependencies {
     // RECOMMENDED — everything included by default (HikariCP, Jackson, Mongo driver, H2,
     // MySQL + PostgreSQL JDBC drivers); override any version via normal dependency management:
     implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
-
-    // OR fat jar — bundled & relocated, zero transitive deps, works anywhere
-    // (one exception: the MySQL driver is not bundled — GPL; add it yourself if needed):
-    //implementation 'br.com.finalcraft.everydatabase:everydatabase-standalone:1.0.1'
 
     // OR runtime download — your jar stays tiny, the same set is downloaded at runtime via Libby:
     //implementation 'br.com.finalcraft.everydatabase:everydatabase-libby:1.0.1'
@@ -120,7 +116,7 @@ dependencies {
 
 <dependency>
   <groupId>br.com.finalcraft.everydatabase</groupId>
-  <!-- or everydatabase-standalone / everydatabase-libby -->
+  <!-- or everydatabase-libby -->
   <artifactId>everydatabase-core</artifactId>
   <version>1.0.1</version>
 </dependency>
@@ -130,7 +126,7 @@ dependencies {
 
 ## Distribution flavors
 
-All three flavors expose the exact same API and carry the **same dependency set by default** — HikariCP, Jackson (`databind` + `yaml`), the MongoDB driver, H2, and the MySQL + PostgreSQL JDBC drivers. They only differ in **how that set reaches your classpath** (with one licensing-driven exception: the fat jar does not bundle the GPL MySQL driver — details in its section).
+Both flavors expose the exact same API and carry the **same dependency set** — HikariCP, Jackson (`databind` + `yaml`), the MongoDB driver, H2, and the MySQL + PostgreSQL JDBC drivers. They only differ in **how that set reaches your classpath**.
 
 ### `everydatabase-core` — recommended
 
@@ -147,31 +143,6 @@ The library with everything declared as a **normal POM dependency**: it works ou
 | `org.postgresql:postgresql` | 42.7.7 | runtime |
 
 > **H2 version note:** H2 1.x and 2.x use **incompatible database file formats** and slightly different SQL dialects. The default stays on 1.4.200 so Java 8 hosts work out of the box; if you run on Java 11+ and want H2 2.x, override it (`implementation 'com.h2database:h2:2.3.232'`) — but don't switch versions over an existing embedded-file database.
-
-### `everydatabase-standalone` — fat jar
-
-One self-contained jar: the library plus the whole default set, **shaded and relocated** under `br.com.finalcraft.everydatabase.libs.*` so it can never clash with other versions on your classpath. Its POM declares **zero dependencies** — drop it into any plugin or app and go. The trade-off: bundled versions can't be overridden (pick `core` if you need that).
-
-| Original package | Relocated to |
-|---|---|
-| `com.zaxxer.hikari` | `br.com.finalcraft.everydatabase.libs.hikari` |
-| `com.mongodb` | `br.com.finalcraft.everydatabase.libs.mongodb` |
-| `org.bson` | `br.com.finalcraft.everydatabase.libs.bson` |
-| `com.fasterxml.jackson` | `br.com.finalcraft.everydatabase.libs.jackson` |
-| `com.fasterxml.jackson.annotation` | **not relocated** — kept at its original coordinates (see below) |
-| `org.yaml.snakeyaml` | `br.com.finalcraft.everydatabase.libs.snakeyaml` |
-| `org.h2` | `br.com.finalcraft.everydatabase.libs.h2` |
-| `org.postgresql` | `br.com.finalcraft.everydatabase.libs.postgresql` |
-
-- **H2 and PostgreSQL drivers are bundled and discoverable.** The merged `META-INF/services/java.sql.Driver` lists both relocated drivers, so `DriverManager` finds them normally. Because they are relocated, a host that ships its own driver version never class-clashes with the bundled ones.
-- **The MySQL driver is *not* bundled — licensing, not size.** `mysql-connector-j` is GPLv2 (with the Universal FOSS Exception); redistributing it inside this jar would impose GPL terms on the artifact. Everything actually bundled is Apache-2.0 / BSD / MIT / MPL+EPL. Need MySQL/MariaDB with the standalone flavor? Add the driver yourself — it loads unrelocated and can't clash, since there is no bundled copy:
-
-  ```groovy
-  implementation 'br.com.finalcraft.everydatabase:everydatabase-standalone:1.0.1'
-  runtimeOnly    'com.mysql:mysql-connector-j:9.4.0'
-  ```
-- **`org.slf4j` is bundled but *not* relocated.** HikariCP hard-requires `org.slf4j.Logger` at class-init; on parent-first plugin classloaders (Bukkit/Paper) the host's SLF4J still wins whenever it ships one, so log auto-detection keeps routing to the host's logging. The bundled copy only provides linkage on hosts without SLF4J (logging falls back to a no-op).
-- **Jackson annotations just work.** `com.fasterxml.jackson.annotation` (`@JsonProperty`, `@JsonIgnore`, `@JsonCreator`, `@JsonFormat`, ...) is bundled **at its original coordinates**: annotations are matched by class identity, so the bundled mapper honors the real annotations on your entities — no relocated imports needed. Only the *advanced* annotations that live inside databind itself (`@JsonSerialize`, `@JsonDeserialize`) remain relocated, as do public overloads that accept Jackson types (e.g. `JacksonJsonCodec(Class, ObjectMapper)` expects the *relocated* `ObjectMapper` in this flavor).
 
 ### `everydatabase-libby` — runtime download
 
@@ -639,7 +610,9 @@ StorageLogSinks.installDefault(event -> plugin.getLogger().info(event.format()))
 An **optional add-on module** that sits *in front of* the core: hold a **typed reference** to an entity in another collection (and even another **database**), cache the hot ones with a policy you control, and resolve them lazily. It's a façade — the core stays untouched. A reference *is not* a cache: `Ref` is the pointer, the `CachingManager` is the cache.
 
 ```groovy
-implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.1'   // pulls core transitively
+// the manager add-on does NOT pull core in transitively — declare both explicitly:
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.1'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.1'
 ```
 
 ```java
@@ -738,7 +711,6 @@ EveryDatabase/
 │   │   ├── transfer/                    # StorageTransfer, TransferReport, ErrorPolicy
 │   │   └── modules/                     # sql (+ postgresql, h2), mongo, localfile, memory
 │   └── src/test/java/                   # backend-agnostic contract suites + per-backend + stress tests
-├── standalone/                          # fat-jar flavor (everydatabase-standalone) — shadow/relocation packaging, no sources
 ├── libby/                               # runtime-download flavor (everydatabase-libby) — DependencyManager, EveryDatabaseDependencies
 ├── manager/                             # OPTIONAL add-on (everydatabase-manager) — typed refs + caching (see manager/README.md)
 └── docker-compose.yml                   # MariaDB / PostgreSQL / MongoDB for the integration suites
@@ -775,9 +747,9 @@ implementation 'com.h2database:h2:2.3.232'     // Java 11+ (2.x line) — read t
 
 - **Build:** authored in Java 17 syntax and compiled to Java 8 via [Jabel](https://github.com/bsideup/jabel); the Gradle toolchain is **JDK 25** (Gradle 9.5 launches on JDK 25 directly).
 - **Concurrency:** `StorageExecutors` uses virtual threads on Java 21+, falling back to a bounded daemon thread pool on older JVMs.
-- **Dependencies & drivers:** every flavor ships the full backend set by default — HikariCP, Jackson, Mongo driver, H2, and the MySQL + PostgreSQL JDBC drivers. With `core` you override versions via normal dependency management; `standalone` bundles everything relocated **except the MySQL driver** (GPL — add it yourself when needed); `libby` downloads the full set at runtime — see [Distribution flavors](#distribution-flavors).
-- **Licensing of bundled code:** everything redistributed inside the standalone fat jar is permissively licensed (Apache-2.0: HikariCP, Jackson, Mongo driver, snakeyaml · BSD-2: PostgreSQL driver · MPL-2.0/EPL-1.0: H2 · MIT: slf4j-api). `mysql-connector-j` (GPLv2 + Universal FOSS Exception) is never redistributed by this project — it is only referenced as POM metadata (`core`) or downloaded from Maven Central on the end user's machine (`libby`).
-- **Logging:** SLF4J is **optional** — `slf4j-api` is a compile-only dependency, detected reflectively at runtime. Without it on the classpath logging quietly no-ops; no `NoClassDefFoundError`, no mandatory logging framework. (The standalone flavor bundles an unrelocated `slf4j-api` for linkage only — the host's SLF4J still wins when present.)
+- **Dependencies & drivers:** both flavors ship the full backend set by default — HikariCP, Jackson, Mongo driver, H2, and the MySQL + PostgreSQL JDBC drivers. With `core` you override versions via normal dependency management; `libby` downloads the full set at runtime — see [Distribution flavors](#distribution-flavors).
+- **Licensing:** this project never redistributes third-party libraries inside its own artifacts — each flavor pulls them as normal dependencies (`core`) or downloads them at runtime (`libby`). In particular `mysql-connector-j` (GPLv2 + Universal FOSS Exception) is only referenced as POM metadata (`core`) or fetched from Maven Central on the end user's machine (`libby`), never bundled.
+- **Logging:** SLF4J is **optional** — `slf4j-api` is a compile-only dependency, detected reflectively at runtime. Without it on the classpath logging quietly no-ops; no `NoClassDefFoundError`, no mandatory logging framework.
 - **Serialisation:** entities must be Jackson-serialisable (a no-arg constructor plus accessors, or appropriate Jackson annotations).
 
 <div align="center">
