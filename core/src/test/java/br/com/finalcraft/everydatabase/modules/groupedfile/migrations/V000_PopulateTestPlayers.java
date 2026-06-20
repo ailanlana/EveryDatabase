@@ -6,11 +6,7 @@ import br.com.finalcraft.everydatabase.modules.AbstractStorageTest;
 import br.com.finalcraft.everydatabase.modules.groupedfile.GroupedFileMigration;
 import br.com.finalcraft.everydatabase.modules.groupedfile.GroupedFileStorage;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Random;
-import java.util.UUID;
+import java.util.*;
 
 /**
  * Test-only migration that seeds the {@code test_players} collection with 20 deterministic players,

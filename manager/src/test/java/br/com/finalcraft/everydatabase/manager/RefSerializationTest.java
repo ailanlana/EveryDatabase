@@ -2,8 +2,8 @@ package br.com.finalcraft.everydatabase.manager;
 
 import br.com.finalcraft.everydatabase.manager.cache.CacheEntry;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
-import br.com.finalcraft.everydatabase.manager.testdata.*;
 import br.com.finalcraft.everydatabase.manager.jackson.RefCodecs;
+import br.com.finalcraft.everydatabase.manager.testdata.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -11,10 +11,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /** A Ref serializes as its key; the target type is recovered from the field on read. */
 class RefSerializationTest {

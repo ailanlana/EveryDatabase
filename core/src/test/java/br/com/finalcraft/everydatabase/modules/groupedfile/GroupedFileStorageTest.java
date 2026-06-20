@@ -22,9 +22,11 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -237,6 +239,63 @@ class GroupedFileStorageTest extends AbstractStorageTest {
             .build();
         assertThrows(IllegalStateException.class, () -> storage.repository(yamlDesc),
             "a YAML codec must not be mixed into a JSON-format grouped storage");
+    }
+
+    @Test
+    @Order(1017)
+    @DisplayName("parallel save() of 6 collections sharing each key loses no update (global per-key lock)")
+    void parallelSavesAcrossCollections_noLostUpdate() throws IOException {
+        final int COLLECTIONS = 6;   // >= 5 distinct collection "types" sharing one key space
+        final int KEYS        = 25;
+
+        // One repository per collection, all keyed by UUID, so collections of one key share its file.
+        List<String> names = new ArrayList<>();
+        List<Repository<UUID, TestPlayer>> repos = new ArrayList<>();
+        for (int c = 0; c < COLLECTIONS; c++) {
+            String name = "subsystem_" + c;
+            names.add(name);
+            repos.add(storage.repository(EntityDescriptor
+                .builder(UUID.class, TestPlayer.class)
+                .collection(name)
+                .keyExtractor(TestPlayer::getUuid)
+                .codec(new JacksonJsonCodec<>(TestPlayer.class))
+                .build()));
+        }
+
+        List<UUID> keys = new ArrayList<>();
+        for (int k = 0; k < KEYS; k++) keys.add(new UUID(7, k));
+
+        // Fire EVERY (collection, key) save up front so they all contend on the shared executor: the
+        // saves for one key all read-modify-write that key's single file concurrently.
+        List<CompletableFuture<Void>> futures = new ArrayList<>(COLLECTIONS * KEYS);
+        for (UUID key : keys) {
+            for (int c = 0; c < COLLECTIONS; c++) {
+                futures.add(repos.get(c).save(new TestPlayer(key, names.get(c), c)));
+            }
+        }
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+        // Every key file must hold ALL collections. The global per-key lock serialises the concurrent
+        // read-modify-writes so none clobbers another - a per-repository lock would lose updates here.
+        for (UUID key : keys) {
+            Path file = keyFile(key);
+            assertTrue(Files.exists(file), "missing file for key " + key);
+            JsonNode root = JSON.readTree(Files.readAllBytes(file));
+            assertEquals(COLLECTIONS, root.size(),
+                "key " + key + " must hold exactly " + COLLECTIONS + " collection nodes, was " + root.size());
+            for (String name : names) {
+                assertTrue(root.has(name), "lost update: '" + name + "' missing for key " + key);
+            }
+        }
+
+        // And each collection reads back exactly its own entity for every key.
+        for (UUID key : keys) {
+            for (int c = 0; c < COLLECTIONS; c++) {
+                TestPlayer found = repos.get(c).find(key).join().orElseThrow(AssertionError::new);
+                assertEquals(names.get(c), found.getName());
+                assertEquals(c, found.getScore());
+            }
+        }
     }
 
     // ------------------------------------------------------------------

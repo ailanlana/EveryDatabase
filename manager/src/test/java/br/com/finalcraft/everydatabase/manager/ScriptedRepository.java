@@ -3,11 +3,7 @@ package br.com.finalcraft.everydatabase.manager;
 import br.com.finalcraft.everydatabase.Repository;
 import br.com.finalcraft.everydatabase.query.Query;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;

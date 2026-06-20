@@ -2,11 +2,7 @@ package br.com.finalcraft.everydatabase.manager;
 
 import br.com.finalcraft.everydatabase.EntityDescriptor;
 import br.com.finalcraft.everydatabase.Storages;
-import br.com.finalcraft.everydatabase.manager.cache.CacheOptions;
-import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
-import br.com.finalcraft.everydatabase.manager.cache.DirtyAccessor;
-import br.com.finalcraft.everydatabase.manager.cache.DirtyFlag;
-import br.com.finalcraft.everydatabase.manager.cache.IDirtyable;
+import br.com.finalcraft.everydatabase.manager.cache.*;
 import br.com.finalcraft.everydatabase.manager.testdata.DirtyFlagAccount;
 import br.com.finalcraft.everydatabase.manager.testdata.DirtyableAccount;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryStorage;
@@ -19,12 +15,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /** Dirty tracking on the caching manager: dirty-wins, seedIfAbsent, flushDirty, batch failures, both opt-in forms. */
 class DirtyTrackingCachingManagerTest {
