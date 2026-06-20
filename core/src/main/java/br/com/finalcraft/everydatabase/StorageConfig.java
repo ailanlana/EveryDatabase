@@ -1,5 +1,6 @@
 package br.com.finalcraft.everydatabase;
 
+import br.com.finalcraft.everydatabase.modules.groupedfile.GroupedFileConfig;
 import br.com.finalcraft.everydatabase.modules.localfile.LocalFileConfig;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryConfig;
 import br.com.finalcraft.everydatabase.modules.mongo.MongoConfig;
@@ -12,6 +13,7 @@ import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
  * <ul>
  *   <li>{@link InMemoryConfig}</li>
  *   <li>{@link LocalFileConfig}</li>
+ *   <li>{@link GroupedFileConfig}</li>
  *   <li>{@link SqlConfig}</li>
  *   <li>{@link MongoConfig}</li>
  * </ul>

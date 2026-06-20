@@ -1,5 +1,7 @@
 package br.com.finalcraft.everydatabase;
 
+import br.com.finalcraft.everydatabase.modules.groupedfile.GroupedFileConfig;
+import br.com.finalcraft.everydatabase.modules.groupedfile.GroupedFileStorage;
 import br.com.finalcraft.everydatabase.modules.localfile.LocalFileConfig;
 import br.com.finalcraft.everydatabase.modules.localfile.LocalFileStorage;
 import br.com.finalcraft.everydatabase.modules.memory.InMemoryConfig;
@@ -92,6 +94,15 @@ public final class Storages {
     }
 
     /**
+     * Creates a {@link GroupedFileStorage} (key-major: one file per key holding every collection that
+     * shares that key). The inverse of {@link #createLocalFile}'s collection-major layout - see
+     * {@link GroupedFileConfig}.
+     */
+    public static GroupedFileStorage createGroupedFile(GroupedFileConfig config) {
+        return new GroupedFileStorage(config);
+    }
+
+    /**
      * Creates an {@link InMemoryStorage}. Data is lost when the JVM exits.
      * The {@link InMemoryConfig} parameter is unused but kept for API symmetry;
      * see {@link #createInMemory()} for a no-arg overload.
@@ -132,6 +143,10 @@ public final class Storages {
 
         if (config instanceof LocalFileConfig){
             return createLocalFile((LocalFileConfig) config);
+        }
+
+        if (config instanceof GroupedFileConfig){
+            return createGroupedFile((GroupedFileConfig) config);
         }
 
         if (config instanceof InMemoryConfig){
