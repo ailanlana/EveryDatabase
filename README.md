@@ -60,9 +60,12 @@ Most persistence libraries marry you to one engine. EveryDatabase treats the eng
 | **H2** (mem / file / tcp) | `Storages.createH2` | ✅ | ✅ | ✅ native column + B-tree | ❌ *(by design)* | Durable / ephemeral |
 | **MongoDB** | `Storages.createMongo` | ✅ *(replica set)* | ✅ | ✅ native index | ✅ | Durable |
 | **Local files** | `Storages.createLocalFile` | ❌ | ✅ | ⚠️ full scan (no real index) | ❌ | Durable (one file per entity) |
+| **Grouped files** | `Storages.createGroupedFile` | ❌ | ✅ | ⚠️ full scan (no real index) | ❌ | Durable (one file per key, all collections) |
 | **In-memory** | `Storages.createInMemory` | ✅ *(no isolation)* | ❌ | ✅ in-memory map | ❌ | Ephemeral |
 
 > MySQL/MariaDB and PostgreSQL store the entity in a **native `JSON` column**, and MongoDB as a **native BSON sub-document** — not an escaped string — so the data stays queryable and readable in standard DB tools. (H2 stores it as plain `TEXT`.)
+
+> 📊 **Performance:** see the **[Benchmarks](https://github.com/EverNife/EveryDatabase/wiki/Benchmarks)** wiki page for per-backend throughput (insert / query / update / delete) at 10k records, plus a pick-a-backend cheat sheet and the caveats.
 
 ---
 
@@ -744,7 +747,7 @@ The integration suites need real database servers. `docker-compose.yml` starts a
 |---|---|---|
 | MariaDB (MySQL-compatible) | `39306` | `root` / `root` |
 | PostgreSQL | `39307` | `root` / `root` |
-| MongoDB | `39308` | `root` / `root` |
+| MongoDB | `39308` | none (1-node replica set) |
 
 ```bash
 docker compose up -d            # start all three
@@ -767,6 +770,8 @@ Running `./gradlew :core:test` brings the containers up automatically (the Gradl
 ```
 
 Override connection coordinates with env vars or `-Dkey=value` (e.g. `MARIADB_HOST`, `MONGO_USER`, `POSTGRES_URL`). Each SQL/Mongo test method runs against its own throwaway database (`enc_NNN_<backend>_<method>`), dropped automatically afterwards — set `TEST_KEEP_DATABASES=true` to keep them for inspection.
+
+> 📊 The `@Tag("stress")` suites double as a **benchmark**: each prints a per-backend throughput report (insert/query/update/delete + phase breakdown). Curated numbers, recommendations and caveats live on the **[Benchmarks](https://github.com/EverNife/EveryDatabase/wiki/Benchmarks)** wiki page.
 
 ---
 
