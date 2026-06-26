@@ -90,9 +90,9 @@ public abstract class AbstractStorageStressTest {
     private static final int BULK_DEL_FROM = 9_000;
     private static final int BULK_DEL_TO   = 9_099;
 
-    // Per-phase wall-clock durations, filled by the orchestrator
-    private long phaseInsertMs, phaseReadsMs, phaseScoreMs, phaseBoolMs, phaseWorldMs,
-                 phaseAndMs, phaseTimestampMs, phaseSaveAllMs, phaseUpdateMs, phaseDeleteMs;
+    // Per-phase wall-clock durations (nanoseconds), filled by the orchestrator
+    private long phaseInsertNanos, phaseReadsNanos, phaseScoreNanos, phaseBoolNanos, phaseWorldNanos,
+                 phaseAndNanos, phaseTimestampNanos, phaseSaveAllNanos, phaseUpdateNanos, phaseDeleteNanos;
 
     // ------------------------------------------------------------------
     //  Orchestrator
@@ -106,27 +106,46 @@ public abstract class AbstractStorageStressTest {
         report("=================================================");
         report("Total Records : " + TOTAL_PLAYERS);
 
-        long globalStart = System.currentTimeMillis();
+        long globalStart = System.nanoTime();
 
         phase1_generateDataset();
-        phaseInsertMs    = timed(this::phase2_bulkInsert);
-        phaseReadsMs     = timed(this::phase3_basicReads);
-        phaseScoreMs     = timed(this::phase4_scoreQueries);
-        phaseBoolMs      = timed(this::phase5_booleanQueries);
-        phaseWorldMs     = timed(this::phase6_worldQueries);
-        phaseAndMs       = timed(this::phase7_compoundAndQueries);
-        phaseTimestampMs = timed(this::phase8_timestampScenarios);
-        phaseSaveAllMs   = timed(this::phase9_saveAllScenarios);
-        phaseUpdateMs    = timed(this::phase10_bulkUpdate);
-        phaseDeleteMs    = timed(this::phase11_deletes);
+        phaseInsertNanos    = timed(this::phase2_bulkInsert);
+        phaseReadsNanos     = timed(this::phase3_basicReads);
+        phaseScoreNanos     = timed(this::phase4_scoreQueries);
+        phaseBoolNanos      = timed(this::phase5_booleanQueries);
+        phaseWorldNanos     = timed(this::phase6_worldQueries);
+        phaseAndNanos       = timed(this::phase7_compoundAndQueries);
+        phaseTimestampNanos = timed(this::phase8_timestampScenarios);
+        phaseSaveAllNanos   = timed(this::phase9_saveAllScenarios);
+        phaseUpdateNanos    = timed(this::phase10_bulkUpdate);
+        phaseDeleteNanos    = timed(this::phase11_deletes);
 
-        printFinalSummary(System.currentTimeMillis() - globalStart);
+        printFinalSummary(System.nanoTime() - globalStart);
     }
 
+    /** Times {@code phase} with nanosecond resolution (so sub-millisecond phases still yield a
+     *  meaningful throughput) and returns the elapsed nanoseconds. */
     private static long timed(Runnable phase) {
-        long start = System.currentTimeMillis();
+        long start = System.nanoTime();
         phase.run();
-        return System.currentTimeMillis() - start;
+        return System.nanoTime() - start;
+    }
+
+    /** Elapsed nanoseconds rendered as whole milliseconds, for display. */
+    private static long msOf(long nanos) {
+        return nanos / 1_000_000L;
+    }
+
+    /** Throughput in operations/second from a nanosecond duration. Floors the duration at 1ns only to
+     *  avoid division by zero - it never floors at one second, so fast backends report their real
+     *  throughput instead of being capped at the record count. */
+    private static double opsPerSec(long count, long nanos) {
+        return count / (Math.max(1L, nanos) / 1_000_000_000.0);
+    }
+
+    /** Integer percentage of {@code partNanos} within {@code totalNanos} (guards a zero total). */
+    private static int pct(long partNanos, long totalNanos) {
+        return (int) (partNanos * 100 / Math.max(1L, totalNanos));
     }
 
     // ------------------------------------------------------------------
@@ -195,8 +214,8 @@ public abstract class AbstractStorageStressTest {
                 batchStart, batchEnd - 1, inserted, elapsed);
         }
         long insertDuration = System.currentTimeMillis() - stageStart;
-        report("[INSERT SUMMARY] records=%,d | time=%d ms | ops/s=%.0f",
-            inserted, insertDuration, inserted / Math.max(1.0, insertDuration / 1000.0));
+        report("[INSERT SUMMARY] records=%,d | time=%d ms | ops/s=%,.0f",
+            inserted, insertDuration, inserted / (Math.max(1L, insertDuration) / 1000.0));
     }
 
     // ------------------------------------------------------------------
@@ -808,15 +827,16 @@ public abstract class AbstractStorageStressTest {
     //  Final summary
     // ------------------------------------------------------------------
 
-    private void printFinalSummary(long totalMs) {
+    private void printFinalSummary(long totalNanos) {
         LongSummaryStatistics tsStats = timestampQueryTimes.stream()
             .mapToLong(Long::longValue)
             .summaryStatistics();
 
         // Total query count across all query phases (score + bool + world + AND + timestamp)
         // Phase 4: 7 queries, Phase 5: 2, Phase 6: 4, Phase 7: 3, Phase 8: scenario count
-        int totalQueryCount = 7 + 2 + 4 + 3 + (int) tsStats.getCount();
-        long totalQueryMs   = phaseScoreMs + phaseBoolMs + phaseWorldMs + phaseAndMs + phaseTimestampMs;
+        int totalQueryCount  = 7 + 2 + 4 + 3 + (int) tsStats.getCount();
+        long totalQueryNanos = phaseScoreNanos + phaseBoolNanos + phaseWorldNanos + phaseAndNanos + phaseTimestampNanos;
+        long totalMs         = msOf(totalNanos);
 
         report("\n=================================================");
         report("FINAL SUMMARY");
@@ -841,49 +861,42 @@ public abstract class AbstractStorageStressTest {
         report("  Remaining        : %,d", finalCount);
 
         report("\n[THROUGHPUT]");
-        double insertOpsPerSec = TOTAL_PLAYERS / Math.max(1.0, phaseInsertMs / 1000.0);
-        double insertMsPerRec  = phaseInsertMs / (double) TOTAL_PLAYERS;
-        report("  Insert           : %,d records in %,d ms  ->  %,.0f ops/s  |  %.3f ms/record",
-            TOTAL_PLAYERS, phaseInsertMs, insertOpsPerSec, insertMsPerRec);
-
-        double saveAllOpsPerSec = saveAllTotalSaved / Math.max(1.0, phaseSaveAllMs / 1000.0);
+        report("  Insert           : %,d records in %,d ms  ->  %,.0f ops/s  |  %.4f ms/record",
+            TOTAL_PLAYERS, msOf(phaseInsertNanos), opsPerSec(TOTAL_PLAYERS, phaseInsertNanos),
+            (phaseInsertNanos / 1_000_000.0) / TOTAL_PLAYERS);
         report("  SaveAll (P9)     : %,d records in %,d ms  ->  %,.0f ops/s",
-            saveAllTotalSaved, phaseSaveAllMs, saveAllOpsPerSec);
-
-        double updateOpsPerSec = 1001.0 / Math.max(1.0, phaseUpdateMs / 1000.0);
+            saveAllTotalSaved, msOf(phaseSaveAllNanos), opsPerSec(saveAllTotalSaved, phaseSaveAllNanos));
         report("  Update           : 1,001 records in %,d ms  ->  %,.0f ops/s",
-            phaseUpdateMs, updateOpsPerSec);
-
-        double deleteOpsPerSec = 101.0 / Math.max(1.0, phaseDeleteMs / 1000.0);
+            msOf(phaseUpdateNanos), opsPerSec(1001, phaseUpdateNanos));
         report("  Delete           : 101 records in %,d ms  ->  %,.0f ops/s",
-            phaseDeleteMs, deleteOpsPerSec);
+            msOf(phaseDeleteNanos), opsPerSec(101, phaseDeleteNanos));
 
         report("\n[QUERY PERFORMANCE]");
-        report("  Total queries    : %d  |  total time : %,d ms  |  avg : %.1f ms/query",
-            totalQueryCount, totalQueryMs, totalQueryMs / (double) totalQueryCount);
-        report("  Score queries    : %d queries in %,d ms  |  avg %.1f ms",
-            7, phaseScoreMs, phaseScoreMs / 7.0);
-        report("  Boolean queries  : %d queries in %,d ms  |  avg %.1f ms",
-            2, phaseBoolMs, phaseBoolMs / 2.0);
-        report("  World queries    : %d queries in %,d ms  |  avg %.1f ms",
-            4, phaseWorldMs, phaseWorldMs / 4.0);
-        report("  AND queries      : %d queries in %,d ms  |  avg %.1f ms",
-            3, phaseAndMs, phaseAndMs / 3.0);
+        report("  Total queries    : %d  |  total time : %,d ms  |  avg : %.2f ms/query",
+            totalQueryCount, msOf(totalQueryNanos), (totalQueryNanos / 1_000_000.0) / totalQueryCount);
+        report("  Score queries    : %d queries in %,d ms  |  avg %.2f ms",
+            7, msOf(phaseScoreNanos), (phaseScoreNanos / 1_000_000.0) / 7.0);
+        report("  Boolean queries  : %d queries in %,d ms  |  avg %.2f ms",
+            2, msOf(phaseBoolNanos), (phaseBoolNanos / 1_000_000.0) / 2.0);
+        report("  World queries    : %d queries in %,d ms  |  avg %.2f ms",
+            4, msOf(phaseWorldNanos), (phaseWorldNanos / 1_000_000.0) / 4.0);
+        report("  AND queries      : %d queries in %,d ms  |  avg %.2f ms",
+            3, msOf(phaseAndNanos), (phaseAndNanos / 1_000_000.0) / 3.0);
         report("  Timestamp scen.  : %d queries in %,d ms  |  min %d ms  |  max %d ms  |  avg %.1f ms",
-            (int) tsStats.getCount(), phaseTimestampMs,
+            (int) tsStats.getCount(), msOf(phaseTimestampNanos),
             tsStats.getMin(), tsStats.getMax(), tsStats.getAverage());
 
         report("\n[PHASE BREAKDOWN]");
-        report("  P2  Insert       : %,d ms  (%d%%)", phaseInsertMs,    phaseInsertMs    * 100 / Math.max(1, totalMs));
-        report("  P3  Basic reads  : %,d ms  (%d%%)", phaseReadsMs,     phaseReadsMs     * 100 / Math.max(1, totalMs));
-        report("  P4  Score Q      : %,d ms  (%d%%)", phaseScoreMs,     phaseScoreMs     * 100 / Math.max(1, totalMs));
-        report("  P5  Boolean Q    : %,d ms  (%d%%)", phaseBoolMs,      phaseBoolMs      * 100 / Math.max(1, totalMs));
-        report("  P6  World Q      : %,d ms  (%d%%)", phaseWorldMs,     phaseWorldMs     * 100 / Math.max(1, totalMs));
-        report("  P7  AND Q        : %,d ms  (%d%%)", phaseAndMs,       phaseAndMs       * 100 / Math.max(1, totalMs));
-        report("  P8  Timestamp Q  : %,d ms  (%d%%)", phaseTimestampMs, phaseTimestampMs * 100 / Math.max(1, totalMs));
-        report("  P9  saveAll Scen : %,d ms  (%d%%)", phaseSaveAllMs,   phaseSaveAllMs   * 100 / Math.max(1, totalMs));
-        report("  P10 Update       : %,d ms  (%d%%)", phaseUpdateMs,    phaseUpdateMs    * 100 / Math.max(1, totalMs));
-        report("  P11 Delete       : %,d ms  (%d%%)", phaseDeleteMs,    phaseDeleteMs    * 100 / Math.max(1, totalMs));
+        report("  P2  Insert       : %,d ms  (%d%%)", msOf(phaseInsertNanos),    pct(phaseInsertNanos,    totalNanos));
+        report("  P3  Basic reads  : %,d ms  (%d%%)", msOf(phaseReadsNanos),     pct(phaseReadsNanos,     totalNanos));
+        report("  P4  Score Q      : %,d ms  (%d%%)", msOf(phaseScoreNanos),     pct(phaseScoreNanos,     totalNanos));
+        report("  P5  Boolean Q    : %,d ms  (%d%%)", msOf(phaseBoolNanos),      pct(phaseBoolNanos,      totalNanos));
+        report("  P6  World Q      : %,d ms  (%d%%)", msOf(phaseWorldNanos),     pct(phaseWorldNanos,     totalNanos));
+        report("  P7  AND Q        : %,d ms  (%d%%)", msOf(phaseAndNanos),       pct(phaseAndNanos,       totalNanos));
+        report("  P8  Timestamp Q  : %,d ms  (%d%%)", msOf(phaseTimestampNanos), pct(phaseTimestampNanos, totalNanos));
+        report("  P9  saveAll Scen : %,d ms  (%d%%)", msOf(phaseSaveAllNanos),   pct(phaseSaveAllNanos,   totalNanos));
+        report("  P10 Update       : %,d ms  (%d%%)", msOf(phaseUpdateNanos),    pct(phaseUpdateNanos,    totalNanos));
+        report("  P11 Delete       : %,d ms  (%d%%)", msOf(phaseDeleteNanos),    pct(phaseDeleteNanos,    totalNanos));
         report("  TOTAL            : %,d ms", totalMs);
         report("=================================================\n");
     }
