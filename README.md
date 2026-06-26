@@ -712,7 +712,7 @@ p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-a
 - **Cross-backend by design** — because a reference resolves through its type's manager, a single root entity can fan out across MySQL, PostgreSQL, Mongo, H2, files and memory **at once**, each reference under its own key type.
 - **Per-context registries, no global state** — each `RefRegistry` is its own isolated context; two of them can register a manager for the **same** type backed by different storages without colliding, so independent plugins never interfere. Registries can also chain to a **parent**, composing a private-then-shared lookup (a plugin's own registry falling back to a shared one).
 
-**→ Full guide: [`manager/README.md`](manager/README.md).**
+**→ Full guide: [Caching & References](https://github.com/EverNife/EveryDatabase/wiki/Caching-and-References) on the wiki** (and [Typed References](https://github.com/EverNife/EveryDatabase/wiki/Typed-References), [Caching Managers](https://github.com/EverNife/EveryDatabase/wiki/Caching-Managers), [Cache Policies & Freshness](https://github.com/EverNife/EveryDatabase/wiki/Cache-Policies-and-Freshness), [Cross-Process Cache Sync](https://github.com/EverNife/EveryDatabase/wiki/Cross-Process-Cache-Sync), [One Entity, Many Databases](https://github.com/EverNife/EveryDatabase/wiki/One-Entity-Many-Databases)).**
 
 ---
 
@@ -787,7 +787,7 @@ EveryDatabase/
 │   │   └── modules/                     # sql (+ postgresql, h2), mongo, localfile, memory
 │   └── src/test/java/                   # backend-agnostic contract suites + per-backend + stress tests
 ├── libby/                               # runtime-download flavor (everydatabase-libby) — DependencyManager, EveryDatabaseDependencies
-├── manager/                             # OPTIONAL add-on (everydatabase-manager) — typed refs + caching (see manager/README.md)
+├── manager/                             # OPTIONAL add-on (everydatabase-manager) — typed refs + caching (see the wiki: Caching & References)
 └── docker-compose.yml                   # MariaDB / PostgreSQL / MongoDB for the integration suites
 ```
 

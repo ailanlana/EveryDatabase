@@ -117,11 +117,11 @@ configure([project(':core'), project(':libby'), project(':manager')]) {
 //    ./gradlew verifyDocsVersions  - fail if any is stale (wired into `check`)
 //
 //  Only the everydatabase-{core,libby,manager} version is stamped (the value that
-//  changes every release and is duplicated across both READMEs). Dependency versions
+//  changes every release) in the root README. Dependency versions
 //  live in the catalog and, for the runtime-download flavor, flow into Libby through
 //  the generated DependencyVersions class - see libby/build.gradle.
 // ======================================================================
-def versionedDocs = [file('README.md'), file('manager/README.md')]
+def versionedDocs = [file('README.md')]
 
 // Returns `text` with every everydatabase artifact coordinate set to `ver`.
 // Two shapes are covered: Gradle/plain quoted coordinates, and Maven <version> tags.
