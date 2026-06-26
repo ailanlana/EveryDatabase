@@ -195,7 +195,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                 log.skippedCorruptedRow(descriptor.collection(), String.valueOf(key), e);
                 continue;
             }
-            JsonNode tree = IndexValueExtractor.toTree(entity);
+            JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
             Document set = new Document();
             for (IndexHint hint : newHints) {
                 Object value = IndexValueExtractor.extract(tree, hint);
@@ -274,7 +274,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
 
         // Populate _idx_* sibling fields for every declared IndexHint.
         if (!hintsByPath.isEmpty()) {
-            JsonNode tree = IndexValueExtractor.toTree(entity);
+            JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
             for (IndexHint hint : hintsByPath.values()) {
                 Object value = IndexValueExtractor.extract(tree, hint);
                 // Store TIMESTAMP as BSON Date so Compass shows human-readable values.
@@ -336,7 +336,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
 
                 Document setDoc = new Document(COL_DATA, toDataDoc(data));
                 if (!hintsByPath.isEmpty()) {
-                    JsonNode tree = IndexValueExtractor.toTree(entity);
+                    JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
                     for (IndexHint hint : hintsByPath.values()) {
                         Object value = IndexValueExtractor.extract(tree, hint);
                         setDoc.append(hint.indexColumnName(), toMongoValue(value, hint));
@@ -376,7 +376,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
                             .append(COL_DATA, toDataDoc(insertData))
                             .append(COL_VERSION, 0L);
                         if (!hintsByPath.isEmpty()) {
-                            JsonNode tree = IndexValueExtractor.toTree(entity);
+                            JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
                             for (IndexHint hint : hintsByPath.values()) {
                                 Object value = IndexValueExtractor.extract(tree, hint);
                                 insertDoc.append(hint.indexColumnName(), toMongoValue(value, hint));
@@ -579,7 +579,7 @@ final class MongoRepository<K, V> implements Repository<K, V> {
             List<V> content = hasNext ? new ArrayList<>(rows.subList(0, limit)) : rows;
             Cursor next = (hasNext && !content.isEmpty())
                 ? QueryResultOrdering.nextCursorFrom(content.get(content.size() - 1), orderHint,
-                    cursor.direction(), descriptor.keyExtractor())
+                    cursor.direction(), descriptor.keyExtractor(), descriptor.codec())
                 : null;
             QueryOptions order = QueryOptions.builder()
                 .orderBy(cursor.orderBy(), cursor.direction()).limit(limit).build();

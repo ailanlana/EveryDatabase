@@ -206,7 +206,7 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
         }
         QueryOptions order = QueryOptions.builder().orderBy(cursor.orderBy(), cursor.direction()).build();
         return query(query, order).thenApply(ordered ->
-            QueryResultOrdering.keysetSlice(ordered, cursor, limit, hint, descriptor.keyExtractor()));
+            QueryResultOrdering.keysetSlice(ordered, cursor, limit, hint, descriptor.keyExtractor(), descriptor.codec()));
     }
 
     @Override
@@ -279,7 +279,7 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
                 if (v != null) result.add(deepCopy(v));
             }
         }
-        result = QueryResultOrdering.apply(result, options, hintsByPath, descriptor.keyExtractor());
+        result = QueryResultOrdering.apply(result, options, hintsByPath, descriptor.keyExtractor(), descriptor.codec());
 
         log.queried(descriptor.collection(), query, result.size(), System.currentTimeMillis() - startMs);
         return CompletableFuture.completedFuture(result);
@@ -291,7 +291,7 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
 
     private void addToIndexes(K key, V entity) {
         if (indexes.isEmpty()) return;
-        JsonNode tree = IndexValueExtractor.toTree(entity);
+        JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
         for (IndexHint hint : hintsByPath.values()) {
             Object value = IndexValueExtractor.extract(tree, hint);
             if (value == null) continue;
@@ -303,7 +303,7 @@ final class InMemoryRepository<K, V> implements Repository<K, V> {
 
     private void removeFromIndexes(K key, V entity) {
         if (indexes.isEmpty()) return;
-        JsonNode tree = IndexValueExtractor.toTree(entity);
+        JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
         for (IndexHint hint : hintsByPath.values()) {
             Object value = IndexValueExtractor.extract(tree, hint);
             if (value == null) continue;

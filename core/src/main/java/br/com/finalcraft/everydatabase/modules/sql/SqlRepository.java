@@ -458,7 +458,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                     log.skippedCorruptedRow(tableName(), key, e);
                     continue; // skip undecodable rows
                 }
-                JsonNode tree = IndexValueExtractor.toTree(entity);
+                JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
                 int slot = 1;
                 for (IndexHint hint : newHints) {
                     ps.setObject(slot++, toJdbcValue(IndexValueExtractor.extract(tree, hint), hint));
@@ -770,7 +770,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             setDataParam(ps, slot++, dataStr);
             ps.setLong(slot++, lockVersion);
             if (!indexes.isEmpty()) {
-                JsonNode tree = IndexValueExtractor.toTree(entity);
+                JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
                 for (IndexHint hint : indexes) {
                     Object value = IndexValueExtractor.extract(tree, hint);
                     ps.setObject(slot++, toJdbcValue(value, hint));
@@ -803,7 +803,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
             int slot = 1;
             setDataParam(ps, slot++, dataStr);
             if (!indexes.isEmpty()) {
-                JsonNode tree = IndexValueExtractor.toTree(entity);
+                JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
                 for (IndexHint hint : indexes) {
                     Object value = IndexValueExtractor.extract(tree, hint);
                     ps.setObject(slot++, toJdbcValue(value, hint));
@@ -902,7 +902,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
         ps.setString(1, key.toString());
         setDataParam(ps, 2, new String(data, StandardCharsets.UTF_8));
         if (!indexes.isEmpty()) {
-            JsonNode tree = IndexValueExtractor.toTree(entity);
+            JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
             int slot = 3;
             for (IndexHint hint : indexes) {
                 Object value = IndexValueExtractor.extract(tree, hint);
@@ -1118,7 +1118,7 @@ public class SqlRepository<K, V> implements Repository<K, V> {
                 List<V> content = hasNext ? new ArrayList<>(rows.subList(0, limit)) : rows;
                 Cursor next = (hasNext && !content.isEmpty())
                     ? QueryResultOrdering.nextCursorFrom(content.get(content.size() - 1), orderHint,
-                        cursor.direction(), descriptor.keyExtractor())
+                        cursor.direction(), descriptor.keyExtractor(), descriptor.codec())
                     : null;
                 QueryOptions order = QueryOptions.builder()
                     .orderBy(cursor.orderBy(), cursor.direction()).limit(limit).build();

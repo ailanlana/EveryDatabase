@@ -1,5 +1,7 @@
 package br.com.finalcraft.everydatabase.query;
 
+import br.com.finalcraft.everydatabase.codec.Codec;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -47,18 +49,21 @@ public final class QueryResultOrdering {
      * @param hintsByPath  declared index hints, keyed by field path
      * @param keyExtractor reads an entity's key (compared by its {@code toString()} to mirror how
      *                     SQL/Mongo persist the key) for stable tie-breaking
+     * @param codec        the entity codec, so the order value is read with the same Jackson mapper
+     *                     the entity is persisted with (see {@link IndexValueExtractor#mapperFor})
      */
     public static <V> List<V> apply(List<V> matched, QueryOptions options,
                                     Map<String, IndexHint> hintsByPath,
-                                    Function<? super V, ?> keyExtractor) {
+                                    Function<? super V, ?> keyExtractor,
+                                    Codec<?> codec) {
         boolean paginating = options.hasOffset() || options.hasLimit();
         List<V> ordered;
         if (options.hasOrder()) {
             ordered = sorted(matched, hintsByPath.get(options.orderBy()),
-                options.order() == IndexHint.Order.DESCENDING, keyExtractor);
+                options.order() == IndexHint.Order.DESCENDING, keyExtractor, codec);
         } else if (paginating) {
             // Stable pagination needs a deterministic order even without an explicit sort field.
-            ordered = sorted(matched, null, false, keyExtractor);
+            ordered = sorted(matched, null, false, keyExtractor, codec);
         } else {
             return matched;
         }
@@ -71,10 +76,10 @@ public final class QueryResultOrdering {
     }
 
     private static <V> List<V> sorted(List<V> matched, IndexHint hint, boolean descending,
-                                      Function<? super V, ?> keyExtractor) {
+                                      Function<? super V, ?> keyExtractor, Codec<?> codec) {
         List<Decorated<V>> decorated = new ArrayList<>(matched.size());
         for (V v : matched) {
-            Object orderValue = hint == null ? null : IndexValueExtractor.extract(IndexValueExtractor.toTree(v), hint);
+            Object orderValue = hint == null ? null : IndexValueExtractor.extract(IndexValueExtractor.toTree(v, codec), hint);
             Object key = keyExtractor.apply(v);
             decorated.add(new Decorated<>(v, orderValue, key == null ? null : key.toString()));
         }
@@ -100,7 +105,8 @@ public final class QueryResultOrdering {
      * consistent with the SQL/Mongo keyset predicates.
      */
     public static <V> Slice<V> keysetSlice(List<V> ordered, Cursor cursor, int limit,
-                                           IndexHint hint, Function<? super V, ?> keyExtractor) {
+                                           IndexHint hint, Function<? super V, ?> keyExtractor,
+                                           Codec<?> codec) {
         int from = 0;
         if (!cursor.isStart()) {
             Object cv = coerce(cursor.lastValue(), hint);
@@ -108,7 +114,7 @@ public final class QueryResultOrdering {
             boolean descending = cursor.direction() == IndexHint.Order.DESCENDING;
             while (from < ordered.size()) {
                 V row = ordered.get(from);
-                Object rv = IndexValueExtractor.extract(IndexValueExtractor.toTree(row), hint);
+                Object rv = IndexValueExtractor.extract(IndexValueExtractor.toTree(row, codec), hint);
                 if (compareInOrder(rv, keyOf(keyExtractor, row), cv, ck, descending) > 0) break;
                 from++;
             }
@@ -117,7 +123,7 @@ public final class QueryResultOrdering {
         List<V> content = new ArrayList<>(ordered.subList(from, to));
         boolean hasNext = to < ordered.size();
         Cursor next = (hasNext && !content.isEmpty())
-            ? nextCursorFrom(content.get(content.size() - 1), hint, cursor.direction(), keyExtractor)
+            ? nextCursorFrom(content.get(content.size() - 1), hint, cursor.direction(), keyExtractor, codec)
             : null;
         QueryOptions order = QueryOptions.builder()
             .orderBy(cursor.orderBy(), cursor.direction()).limit(limit).build();
@@ -126,8 +132,8 @@ public final class QueryResultOrdering {
 
     /** Builds the cursor positioned right after {@code row} (its order value + key), for the next page. */
     public static <V> Cursor nextCursorFrom(V row, IndexHint hint, IndexHint.Order direction,
-                                            Function<? super V, ?> keyExtractor) {
-        Object value = IndexValueExtractor.extract(IndexValueExtractor.toTree(row), hint);
+                                            Function<? super V, ?> keyExtractor, Codec<?> codec) {
+        Object value = IndexValueExtractor.extract(IndexValueExtractor.toTree(row, codec), hint);
         return Cursor.after(hint.fieldPath(), direction, value, keyOf(keyExtractor, row));
     }
 

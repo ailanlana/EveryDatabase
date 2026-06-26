@@ -345,10 +345,10 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
         return all().thenApply(stream -> {
             List<V> filtered = new ArrayList<>();
             stream.forEach(entity -> {
-                JsonNode tree = IndexValueExtractor.toTree(entity);
+                JsonNode tree = IndexValueExtractor.toTree(entity, descriptor.codec());
                 if (matchesAll(tree, query)) filtered.add(entity);
             });
-            List<V> result = QueryResultOrdering.apply(filtered, finalOptions, hintsByPath, descriptor.keyExtractor());
+            List<V> result = QueryResultOrdering.apply(filtered, finalOptions, hintsByPath, descriptor.keyExtractor(), descriptor.codec());
             log.queried(collection, query, result.size(), System.currentTimeMillis() - startMs);
             return result;
         });
@@ -367,7 +367,7 @@ final class GroupedFileRepository<K, V> implements Repository<K, V> {
         }
         QueryOptions order = QueryOptions.builder().orderBy(cursor.orderBy(), cursor.direction()).build();
         return query(query, order).thenApply(ordered ->
-            QueryResultOrdering.keysetSlice(ordered, cursor, limit, hint, descriptor.keyExtractor()));
+            QueryResultOrdering.keysetSlice(ordered, cursor, limit, hint, descriptor.keyExtractor(), descriptor.codec()));
     }
 
     private boolean matchesAll(JsonNode tree, Query query) {

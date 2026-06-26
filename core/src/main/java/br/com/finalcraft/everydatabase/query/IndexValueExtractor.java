@@ -1,5 +1,8 @@
 package br.com.finalcraft.everydatabase.query;
 
+import br.com.finalcraft.everydatabase.codec.Codec;
+import br.com.finalcraft.everydatabase.codec.JacksonConfig;
+import br.com.finalcraft.everydatabase.codec.ObjectMapperAware;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -22,19 +25,51 @@ import java.time.format.DateTimeParseException;
  */
 public final class IndexValueExtractor {
 
-    /** Shared mapper used only for {@code valueToTree}; safe for concurrent use. */
-    private static final ObjectMapper TREE_MAPPER = JsonMapper.builder().build();
+    /**
+     * Fallback mapper for entities whose codec does not expose its own (see
+     * {@link #mapperFor(Codec)}). Configured with the same {@link JacksonConfig}
+     * profile as the default codecs, so for the common case (default codec) the
+     * indexed tree matches the persisted form without any coupling.
+     */
+    private static final ObjectMapper DEFAULT_MAPPER = JacksonConfig.storageSafe(new JsonMapper());
 
     private IndexValueExtractor() {}
 
     /**
-     * Converts {@code entity} to a Jackson {@link JsonNode} tree.
-     * Throws {@link RuntimeException} only if Jackson cannot inspect the entity at all.
+     * Resolves the Jackson mapper to build the index tree for entities serialised by
+     * {@code codec}: the codec's own mapper when it is {@link ObjectMapperAware} (so the
+     * indexed form of a field can never disagree with the persisted form, even under
+     * custom modules/serialisers), otherwise the shared {@link #DEFAULT_MAPPER}.
+     */
+    public static ObjectMapper mapperFor(Codec<?> codec) {
+        return codec instanceof ObjectMapperAware ? ((ObjectMapperAware) codec).objectMapper() : DEFAULT_MAPPER;
+    }
+
+    /**
+     * Converts {@code entity} to a Jackson {@link JsonNode} tree using the
+     * {@link #DEFAULT_MAPPER}. Prefer {@link #toTree(Object, Codec)} where the codec is
+     * known, so a custom codec mapper is honoured.
      */
     public static JsonNode toTree(Object entity) {
+        return toTree(entity, DEFAULT_MAPPER);
+    }
+
+    /**
+     * Converts {@code entity} to a tree using the mapper {@code codec} serialises with
+     * (see {@link #mapperFor(Codec)}).
+     */
+    public static JsonNode toTree(Object entity, Codec<?> codec) {
+        return toTree(entity, mapperFor(codec));
+    }
+
+    /**
+     * Converts {@code entity} to a Jackson {@link JsonNode} tree using an explicit mapper.
+     * Throws {@link RuntimeException} only if Jackson cannot inspect the entity at all.
+     */
+    public static JsonNode toTree(Object entity, ObjectMapper mapper) {
         if (entity == null) return null;
         try {
-            return TREE_MAPPER.valueToTree(entity);
+            return mapper.valueToTree(entity);
         } catch (Exception e) {
             throw new RuntimeException(
                 "IndexValueExtractor: cannot inspect entity of type "
