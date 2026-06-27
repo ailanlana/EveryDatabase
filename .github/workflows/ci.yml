@@ -1,0 +1,100 @@
+# Build & test gate for pushes to master and every pull request.
+#
+# What it does NOT run: the @Tag("stress") 10k-record suites (excluded with
+# -PskipStress) and the @Tag("benchmark") micro-benchmarks (already opt-in via
+# -PrunBenchmark, so they stay off by default). Everything else runs, including
+# the SQL/Mongo integration suites against real database servers.
+#
+# Database servers: the three integration databases are brought up from the
+# repo's own docker-compose.yml (the single source of truth shared with local
+# dev). They are started here explicitly with `--wait` so the job blocks until
+# each container is healthy -- this is what lets the MongoDB single-node replica
+# set finish electing a PRIMARY before the tests connect (transactions and
+# change streams require it). Because the containers are already up, the Gradle
+# build runs with -PnoDocker (it skips the docker-compose plugin wiring but the
+# SQL/Mongo suites still connect to the running containers on their default
+# host/ports, which match docker-compose.yml).
+#
+# Dual-target Java: the build launches on JDK 25 (Gradle 9.5 runs on it and the
+# tests use it) but production compileJava is pinned to a JDK 17 compiler
+# (Jabel -> Java 8 bytecode). Both JDKs are installed via setup-java; the build
+# does not apply a toolchain auto-download resolver, so Gradle is pointed at the
+# JDK 17 install through org.gradle.java.installations.fromEnv.
+
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch/PR to save runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & test (no stress / no benchmark)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # JDK 25 is the launcher and the test toolchain; JDK 17 is the production
+      # compiler. Listed 17 then 25 so JAVA_HOME points at 25 (the last entry).
+      - name: Set up JDKs 17 and 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            25
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Set up Gradle (dependency + build cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      # Brings up MariaDB (39306), PostgreSQL (39307) and MongoDB (39308, 1-node
+      # replica set). --wait blocks until every healthcheck passes.
+      - name: Start integration databases
+        run: docker compose up -d --wait
+
+      # `build` = assemble + check across :core, :libby and :manager (compile the
+      # dual-target production code, run every test bar stress/benchmark, and the
+      # README version-sync check). fromEnv tells Gradle's toolchain machinery
+      # where the JDK 17 install lives.
+      - name: Build & test
+        run: |
+          ./gradlew build \
+            -PskipStress \
+            -PnoDocker \
+            -Dorg.gradle.java.installations.fromEnv=JAVA_HOME_17_X64,JAVA_HOME_25_X64 \
+            --stacktrace
+
+      - name: Database logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down databases
+        if: always()
+        run: docker compose down -v
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
