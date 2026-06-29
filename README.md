@@ -717,6 +717,32 @@ p.getGuild().resolve().thenAccept(opt -> ...);    // async: cache hit, or load-a
 
 **→ Full guide: [Caching & References](https://github.com/EverNife/EveryDatabase/wiki/Caching-and-References) on the wiki** (and [Typed References](https://github.com/EverNife/EveryDatabase/wiki/Typed-References), [Caching Managers](https://github.com/EverNife/EveryDatabase/wiki/Caching-Managers), [Cache Policies & Freshness](https://github.com/EverNife/EveryDatabase/wiki/Cache-Policies-and-Freshness), [Cross-Process Cache Sync](https://github.com/EverNife/EveryDatabase/wiki/Cross-Process-Cache-Sync), [One Entity, Many Databases](https://github.com/EverNife/EveryDatabase/wiki/One-Entity-Many-Databases)).**
 
+### Cross-process cache sync over pub/sub (`everydatabase-manager-jedis`)
+
+When several instances share one backend, a write on one leaves the others' caches stale. The manager keeps them fresh through the single `CacheSync` facade — a backend-native change feed where it exists (Mongo change streams, Postgres `LISTEN/NOTIFY`), or version **polling** anywhere. For backends with **no native feed** (MySQL/MariaDB, …) an **optional pub/sub transport** replaces polling with real push: lower latency, and no per-key version-check load on the database.
+
+```groovy
+// optional add-on; pulls in Jedis. Declare it alongside manager + core:
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager-jedis:1.0.4'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-manager:1.0.4'
+implementation 'br.com.finalcraft.everydatabase:everydatabase-core:1.0.4'
+```
+
+```java
+// One Jedis client speaks to both Redis AND Valkey (identical RESP wire protocol).
+CacheSyncTransport transport = JedisCacheSyncTransport.connect(
+        new JedisCacheSyncConfig("localhost", 6379));
+
+CacheSync sync = CacheSync.attach(storage)
+        .via(transport)        // push over pub/sub instead of polling — works on ANY backend
+        .bind(guilds)
+        .bind(players)
+        .start();
+// on shutdown: sync.close(); transport.close();   // the transport's lifecycle is yours
+```
+
+Each manager publishes a tiny signal (collection + key + op — **never** entity content) on every local write; the other instances invalidate/evict the matching key. The local in-memory cache stays the source of live objects — the transport only signals *"reload"*, so it never breaks the identity map. Delivery is fire-and-forget (at-least-once, unordered, lossy), so pair it with a `ttl(...)` policy as a self-healing safety net. Only manager-mediated writes (`saveAndCache` / `deleteAndEvict` / `saveAllAndCache`) propagate — a raw `repository().save()` does not. The transport is a generic SPI (`CacheSyncTransport`); Jedis (Redis/Valkey) is the first implementation.
+
 ---
 
 ## Building & running the tests
@@ -748,9 +774,13 @@ The integration suites need real database servers. `docker-compose.yml` starts a
 | MariaDB (MySQL-compatible) | `39306` | `root` / `root` |
 | PostgreSQL | `39307` | `root` / `root` |
 | MongoDB | `39308` | none (1-node replica set) |
+| Valkey | `39309` | none (open) |
+| Redis | `39310` | none (open) |
+
+The last two back the `everydatabase-manager-jedis` cache-sync tests, which run the **same** contract against both servers and self-skip when a server is down.
 
 ```bash
-docker compose up -d            # start all three
+docker compose up -d            # start all of them
 docker compose up -d mariadb    # or just one
 docker compose ps               # check health
 docker compose down             # stop (keeps data)
@@ -793,7 +823,8 @@ EveryDatabase/
 │   └── src/test/java/                   # backend-agnostic contract suites + per-backend + stress tests
 ├── libby/                               # runtime-download flavor (everydatabase-libby) — DependencyManager, EveryDatabaseDependencies
 ├── manager/                             # OPTIONAL add-on (everydatabase-manager) — typed refs + caching (see the wiki: Caching & References)
-└── docker-compose.yml                   # MariaDB / PostgreSQL / MongoDB for the integration suites
+├── manager-jedis/                       # OPTIONAL add-on (everydatabase-manager-jedis) — Redis/Valkey pub/sub cache-sync transport
+└── docker-compose.yml                   # MariaDB / PostgreSQL / MongoDB / Valkey / Redis for the integration suites
 ```
 
 ---
