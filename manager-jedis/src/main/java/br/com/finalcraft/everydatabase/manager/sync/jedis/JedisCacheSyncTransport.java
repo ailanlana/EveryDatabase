@@ -45,6 +45,8 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
     private final ChangeFeedSupport feed;
     private final JedisPool publishPool;
     private final Consumer<Throwable> errorHandler;   // nullable
+    private volatile Consumer<Boolean> connectionListener;   // nullable; notified on connect/disconnect
+    private volatile Boolean lastConnected;                  // last reported state (dedupe transitions)
 
     private volatile boolean running = false;
     private volatile boolean closed = false;   // terminal: once closed, the subscriber is never resurrected
@@ -116,6 +118,11 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
         return subscription;
     }
 
+    @Override
+    public void onConnectionStateChanged(Consumer<Boolean> listener) {
+        this.connectionListener = listener;
+    }
+
     /** Lazily starts the SUBSCRIBE listener thread on first subscribe. Idempotent; a no-op once closed. */
     private synchronized void ensureSubscriberStarted() {
         if (running || closed) {
@@ -141,6 +148,7 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
                     @Override
                     public void onSubscribe(String subscribedChannel, int subscribedChannels) {
                         latch.countDown();   // now safe for close() to call unsubscribe()
+                        setConnected(true);  // the channel is live
                     }
                     @Override
                     public void onMessage(String messageChannel, String payload) {
@@ -155,6 +163,7 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
                     // unsubscribe/RESET drained the last channel. Back off so a server that keeps doing
                     // this cannot spin us in a tight, zero-delay reconnect loop (the catch path below
                     // already backs off on a thrown drop; this covers the exception-free exit).
+                    setConnected(false);
                     reportError(new IllegalStateException(
                             "Jedis SUBSCRIBE returned unexpectedly (server unsubscribe?); reconnecting"));
                     sleepBeforeReconnect();
@@ -163,6 +172,7 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
                 if (!running) {
                     return;   // expected: the transport is closing
                 }
+                setConnected(false);
                 reportError(e);
                 sleepBeforeReconnect();
             } finally {
@@ -232,6 +242,23 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
             Thread.sleep(1000L);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Notifies the connection listener on a connect/disconnect transition (deduped, never throwing). */
+    private void setConnected(boolean connected) {
+        Boolean last = lastConnected;
+        if (last != null && last == connected) {
+            return;   // only notify on a transition
+        }
+        lastConnected = connected;
+        Consumer<Boolean> listener = connectionListener;
+        if (listener != null) {
+            try {
+                listener.accept(connected);
+            } catch (Throwable ignored) {
+                // a connection listener must never break delivery
+            }
         }
     }
 

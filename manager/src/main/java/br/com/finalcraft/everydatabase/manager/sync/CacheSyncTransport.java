@@ -4,6 +4,8 @@ import br.com.finalcraft.everydatabase.changefeed.ChangeEvent;
 import br.com.finalcraft.everydatabase.changefeed.ChangeListener;
 import br.com.finalcraft.everydatabase.changefeed.ChangeSubscription;
 
+import java.util.function.Consumer;
+
 /**
  * A pluggable pub/sub channel that carries cache-invalidation signals between instances, decoupled
  * from the data backend. It is the third cache-sync mechanism, alongside a backend-native change feed
@@ -36,6 +38,19 @@ public interface CacheSyncTransport extends AutoCloseable {
 
     /** Registers {@code listener} to receive signals from the channel. Close the handle to stop delivery. */
     ChangeSubscription subscribe(ChangeListener listener);
+
+    /**
+     * Optional: registers a {@code listener} notified when the transport connects ({@code true}) or
+     * disconnects ({@code false}), so a consumer can fall back to another mechanism (e.g. version
+     * polling) while the channel is down and step aside when it recovers. Fired only on transitions.
+     *
+     * <p>A transport that cannot report connectivity leaves this a no-op; the consumer then assumes the
+     * transport is always available. At most one listener - the latest registration wins; pass
+     * {@code null} to clear it.
+     */
+    default void onConnectionStateChanged(Consumer<Boolean> listener) {
+        // no-op: transports that cannot observe connectivity opt out, and callers assume always-connected
+    }
 
     /** Closes the transport's connections/threads. Idempotent. */
     @Override

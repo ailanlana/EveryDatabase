@@ -69,6 +69,9 @@ import java.util.function.Function;
  */
 public final class CacheSync implements AutoCloseable {
 
+    /** Fallback poll cadence used while a transport is disconnected, when no {@code pollEvery} was set. */
+    private static final Duration DEFAULT_FALLBACK_POLL = Duration.ofSeconds(30);
+
     /** Non-null in {@link #attach(Storage)} mode (the single feed source); null in {@link #auto()} mode. */
     private final Storage attachedSource;
     private final boolean autoMode;
@@ -80,6 +83,7 @@ public final class CacheSync implements AutoCloseable {
     private volatile boolean includeOwnOrigin = false;
     private volatile Consumer<Throwable> errorHandler;
     private volatile CacheSyncTransport transport;
+    private volatile boolean transportFallback = true;
 
     private boolean started;
     private final List<ChangeSubscription> subscriptions = new ArrayList<>();
@@ -153,6 +157,21 @@ public final class CacheSync implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Whether, when a {@link #via(CacheSyncTransport) transport} is used, a standby version-poller takes
+     * over while the transport reports itself disconnected and steps aside when it reconnects
+     * (default {@code true} - the safer setup). The fallback cadence is {@link #pollEvery(Duration)} if
+     * set, otherwise 30s. Disable it to rely purely on the transport (plus any TTL policy).
+     *
+     * <p>Only effective for transports that report connectivity via
+     * {@link CacheSyncTransport#onConnectionStateChanged}; for those that don't, the standby poller is
+     * created but never activated.
+     */
+    public CacheSync transportFallback(boolean enabled) {
+        this.transportFallback = enabled;
+        return this;
+    }
+
     /** Binds {@code manager} using the built-in parser for its key type (see {@link KeyParsers}). */
     public <K, V> CacheSync bind(CachingManager<K, V> manager) {
         return bind(manager, null);
@@ -209,6 +228,7 @@ public final class CacheSync implements AutoCloseable {
             }
             pollers.clear();
             if (transport != null) {
+                transport.onConnectionStateChanged(null);          // detach the fallback connectivity listener
                 for (Binding<?> binding : bindings) {
                     binding.manager.setLocalWriteListener(null);   // stop publishing once the sync is closed
                 }
@@ -257,10 +277,39 @@ public final class CacheSync implements AutoCloseable {
      * and auto mode; the transport is backend-agnostic and routes by collection).
      */
     private void setupTransport(List<Binding<?>> all) {
+        if (transportFallback) {
+            // A standby poller takes over while the transport is disconnected. Registered BEFORE the
+            // subscription so the very first connect failure is observed. It only runs while the
+            // connectivity listener reports the transport down (a no-op transport never activates it).
+            Duration interval = pollInterval != null ? pollInterval : DEFAULT_FALLBACK_POLL;
+            PollingCacheSync fallback = PollingCacheSync.every(interval);
+            if (errorHandler != null) {
+                fallback.onError(errorHandler);
+            }
+            for (Binding<?> binding : all) {
+                fallback.bind(binding.manager);
+            }
+            pollers.add(fallback);
+            transport.onConnectionStateChanged(connected -> onTransportConnectivity(connected, fallback));
+        }
         Map<String, Bound<?>> byCollection = buildByCollection(all);
         subscriptions.add(transport.subscribe(new PushGroup(transport.originId(), byCollection)::onChange));
         for (Binding<?> binding : all) {
             installPublishHook(binding, transport);
+        }
+    }
+
+    /** Activates the standby fallback poller while the transport is disconnected; pauses it when connected. */
+    private void onTransportConnectivity(boolean connected, PollingCacheSync fallback) {
+        synchronized (lifecycle) {
+            if (!started) {
+                return;   // the sync was closed; ignore late connectivity callbacks
+            }
+            if (connected) {
+                fallback.close();   // push restored: stop the safety-net polling (bindings/state are kept)
+            } else {
+                fallback.start();   // push down: schedule the safety-net polling
+            }
         }
     }
 

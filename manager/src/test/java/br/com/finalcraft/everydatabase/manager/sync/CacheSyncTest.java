@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -372,6 +373,59 @@ class CacheSyncTest {
     }
 
     // ------------------------------------------------------------------
+    //  Transport fallback (V2-1): standby polling while the transport is down
+    // ------------------------------------------------------------------
+
+    @Test
+    void transport_fallback_polls_for_a_remote_change_when_disconnected() {
+        InMemoryStorage storage = Storages.createInMemory();
+        storage.init().join();
+        RefRegistry registry = new RefRegistry();
+        CachingManager<UUID, Guild> cache = new CachingManager<>(guildDescriptor(registry), storage, CachePolicy.always(), registry);
+
+        FakeTransport transport = new FakeTransport();
+        UUID id = UUID.randomUUID();
+        cache.saveAndCache(new Guild(id, "v1")).join();
+        cache.resolve(id).join();
+        assertEquals(1, cache.cachedSize());
+
+        // Default: fallback ON. The transport reports down -> the standby poller takes over.
+        try (CacheSync sync = CacheSync.attach(storage).via(transport).pollEvery(Duration.ofHours(1)).bind(cache).start()) {
+            transport.fireConnectivity(false);
+            cache.repository().delete(id).join();   // another instance deletes straight on the backend
+            sync.pollOnce();                          // the active fallback poller catches it
+            assertFalse(cache.peek(id).isPresent(), "fallback polling evicted the deleted key while disconnected");
+            transport.fireConnectivity(true);         // push restored: the poller steps aside (smoke)
+        }
+
+        storage.close().join();
+    }
+
+    @Test
+    void transport_fallback_can_be_disabled() {
+        InMemoryStorage storage = Storages.createInMemory();
+        storage.init().join();
+        RefRegistry registry = new RefRegistry();
+        CachingManager<UUID, Guild> cache = new CachingManager<>(guildDescriptor(registry), storage, CachePolicy.always(), registry);
+
+        FakeTransport transport = new FakeTransport();
+        UUID id = UUID.randomUUID();
+        cache.saveAndCache(new Guild(id, "v1")).join();
+        cache.resolve(id).join();
+
+        // Fallback OFF: no standby poller is created, so pollOnce() has nothing to drive.
+        try (CacheSync sync = CacheSync.attach(storage).via(transport).transportFallback(false)
+                .pollEvery(Duration.ofHours(1)).bind(cache).start()) {
+            transport.fireConnectivity(false);
+            cache.repository().delete(id).join();
+            sync.pollOnce();
+            assertTrue(cache.peek(id).isPresent(), "with fallback disabled, no polling runs");
+        }
+
+        storage.close().join();
+    }
+
+    // ------------------------------------------------------------------
     //  Test doubles
     // ------------------------------------------------------------------
 
@@ -403,12 +457,20 @@ class CacheSyncTest {
     private static final class FakeTransport implements CacheSyncTransport {
         private final List<ChangeEvent> published = new ArrayList<>();
         private final ChangeFeedSupport feed = new ChangeFeedSupport();
+        private volatile Consumer<Boolean> connectionListener;
 
         void deliver(ChangeEvent event) { feed.emit(event); }
+        void fireConnectivity(boolean connected) {
+            Consumer<Boolean> l = connectionListener;
+            if (l != null) {
+                l.accept(connected);
+            }
+        }
 
         @Override public String originId() { return "fake-transport"; }
         @Override public void publish(ChangeEvent event) { published.add(event); }
         @Override public ChangeSubscription subscribe(ChangeListener listener) { return feed.subscribe(listener); }
+        @Override public void onConnectionStateChanged(Consumer<Boolean> listener) { this.connectionListener = listener; }
         @Override public void close() { feed.closeAll(); }
     }
 
