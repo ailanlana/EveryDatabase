@@ -7,7 +7,7 @@ import br.com.finalcraft.everydatabase.manager.CachingManager;
 import br.com.finalcraft.everydatabase.manager.RefRegistry;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
 import br.com.finalcraft.everydatabase.manager.sync.CacheSync;
-import br.com.finalcraft.everydatabase.manager.sync.jedis.testdata.SyncedThing;
+import br.com.finalcraft.everydatabase.manager.testdata.Quest;
 import br.com.finalcraft.everydatabase.modules.sql.SqlConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
@@ -34,6 +34,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * <p>The data backend is a <b>shared in-memory H2</b> ({@code DB_CLOSE_DELAY=-1}, same URL for both
  * storages in this JVM), so the only external dependency is the Jedis server - and it shows the
  * transport propagating <em>updates</em> even on H2, which the version-polling fallback cannot do.
+ * The entity ({@link Quest}) is reused from {@code :manager}'s test classes (shared via the {@code tests}
+ * configuration), not recreated here.
  *
  * <p>Concrete subclasses point at a specific server (Valkey / Redis) via {@link #port()} /
  * {@link #serverName()}; each self-skips when its server is unreachable.
@@ -55,8 +57,8 @@ public abstract class AbstractJedisCacheSyncTest {
 
     protected Storage writerStorage;
     protected Storage readerStorage;
-    protected CachingManager<UUID, SyncedThing> writer;
-    protected CachingManager<UUID, SyncedThing> reader;
+    protected CachingManager<UUID, Quest> writer;
+    protected CachingManager<UUID, Quest> reader;
     protected JedisCacheSyncTransport writerTransport;
     protected JedisCacheSyncTransport readerTransport;
     protected CacheSync writerSync;
@@ -68,7 +70,7 @@ public abstract class AbstractJedisCacheSyncTest {
     void setUp() {
         assumeServerAvailable();
         String suffix = UUID.randomUUID().toString().replace("-", "");
-        String collection = "things_" + suffix;
+        String collection = "quests_" + suffix;
         channel = "everydatabase:test:" + suffix;                       // unique per test: no cross-test bleed
         String dbUrl = "jdbc:h2:mem:jedissync_" + suffix + ";DB_CLOSE_DELAY=-1";
 
@@ -107,27 +109,27 @@ public abstract class AbstractJedisCacheSyncTest {
     @Test
     void a_remote_update_invalidates_the_local_cache() {
         UUID id = UUID.randomUUID();
-        writer.saveAndCache(new SyncedThing(id, "v0")).join();
+        writer.saveAndCache(new Quest(id, "v0", 0L)).join();
         reader.resolve(id).join();
         assertTrue(reader.peek(id).isPresent(), "reader cached v0");
 
-        // Re-write a distinct value each round until the reader observes it: once the pub/sub round-trip
+        // Re-write a distinct title each round until the reader observes it: once the pub/sub round-trip
         // is live the foreign-origin SAVE invalidates the reader, whose next resolve reloads from H2.
         AtomicInteger n = new AtomicInteger();
         awaitUntil(() -> {
-            writer.saveAndCache(new SyncedThing(id, "v-" + n.incrementAndGet())).join();
-            SyncedThing seen = reader.resolve(id).join().orElse(null);
-            return seen != null && seen.getValue().startsWith("v-");
+            writer.saveAndCache(new Quest(id, "v-" + n.incrementAndGet(), 0L)).join();
+            Quest seen = reader.resolve(id).join().orElse(null);
+            return seen != null && seen.getTitle().startsWith("v-");
         }, Duration.ofSeconds(20));
 
-        assertTrue(reader.resolve(id).join().orElseThrow(AssertionError::new).getValue().startsWith("v-"),
+        assertTrue(reader.resolve(id).join().orElseThrow(AssertionError::new).getTitle().startsWith("v-"),
                 "reader reloaded the remote update");
     }
 
     @Test
     void a_remote_delete_evicts_the_local_cache() {
         UUID id = UUID.randomUUID();
-        writer.saveAndCache(new SyncedThing(id, "present")).join();
+        writer.saveAndCache(new Quest(id, "present", 0L)).join();
         reader.resolve(id).join();
         assertTrue(reader.peek(id).isPresent(), "reader cached the entity");
 
@@ -143,20 +145,20 @@ public abstract class AbstractJedisCacheSyncTest {
     @Test
     void a_writer_does_not_invalidate_its_own_cache_via_the_echo() {
         UUID id = UUID.randomUUID();
-        writer.saveAndCache(new SyncedThing(id, "v0")).join();
+        writer.saveAndCache(new Quest(id, "v0", 0L)).join();
         reader.resolve(id).join();
 
         // The writer's updates reach the reader (signal delivered, round-trip live)...
         AtomicInteger n = new AtomicInteger();
         awaitUntil(() -> {
-            writer.saveAndCache(new SyncedThing(id, "v-" + n.incrementAndGet())).join();
-            SyncedThing seen = reader.resolve(id).join().orElse(null);
-            return seen != null && seen.getValue().startsWith("v-");
+            writer.saveAndCache(new Quest(id, "v-" + n.incrementAndGet(), 0L)).join();
+            Quest seen = reader.resolve(id).join().orElse(null);
+            return seen != null && seen.getTitle().startsWith("v-");
         }, Duration.ofSeconds(20));
 
         // ...yet the writer's OWN cache is never invalidated by its own echo (own-origin skip + write-through).
         assertTrue(writer.peek(id).isPresent(), "writer's own cache survives its own echo");
-        assertTrue(writer.peek(id).get().getValue().startsWith("v-"), "writer still serves its write-through value");
+        assertTrue(writer.peek(id).get().getTitle().startsWith("v-"), "writer still serves its write-through value");
     }
 
     // ------------------------------------------------------------------
@@ -167,11 +169,11 @@ public abstract class AbstractJedisCacheSyncTest {
         return new JedisCacheSyncConfig("localhost", port()).withChannel(channel);
     }
 
-    private static EntityDescriptor<UUID, SyncedThing> descriptor(RefRegistry registry, String collection) {
-        return EntityDescriptor.builder(UUID.class, SyncedThing.class)
+    private static EntityDescriptor<UUID, Quest> descriptor(RefRegistry registry, String collection) {
+        return EntityDescriptor.builder(UUID.class, Quest.class)
                 .collection(collection)
-                .keyExtractor(SyncedThing::getId)
-                .codec(registry.codec(SyncedThing.class))
+                .keyExtractor(Quest::getId)
+                .codec(registry.codec(Quest.class))
                 .build();
     }
 
@@ -183,9 +185,9 @@ public abstract class AbstractJedisCacheSyncTest {
     private void establishFeedLive(UUID id) {
         AtomicInteger n = new AtomicInteger();
         awaitUntil(() -> {
-            writer.saveAndCache(new SyncedThing(id, "live-" + n.incrementAndGet())).join();
-            SyncedThing seen = reader.resolve(id).join().orElse(null);
-            return seen != null && seen.getValue().startsWith("live-");
+            writer.saveAndCache(new Quest(id, "live-" + n.incrementAndGet(), 0L)).join();
+            Quest seen = reader.resolve(id).join().orElse(null);
+            return seen != null && seen.getTitle().startsWith("live-");
         }, Duration.ofSeconds(20));
     }
 

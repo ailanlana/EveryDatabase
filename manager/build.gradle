@@ -39,6 +39,23 @@ test {
     useJUnitPlatform()
 }
 
+// Expose the test classes (testdata DTOs + helpers) as a consumable artifact so dependent modules'
+// tests can reuse the entities (Guild, Quest, multibackend.*) instead of recreating them - e.g.
+// :manager-jedis depends on this via `project(path: ':manager', configuration: 'tests')`.
+configurations {
+    tests {
+        canBeConsumed = true
+        canBeResolved = false
+    }
+}
+tasks.register('testJar', Jar) {
+    archiveClassifier = 'tests'
+    from sourceSets.test.output
+}
+artifacts {
+    tests tasks.named('testJar')
+}
+
 publishing {
     publications {
         maven(MavenPublication) {

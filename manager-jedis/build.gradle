@@ -29,6 +29,8 @@ dependencies {
     // shared in-memory data backend).
     testImplementation project(':manager')
     testImplementation project(':core')
+    // Reuse :manager's test entities (Guild, Quest, multibackend.*) instead of recreating DTOs here.
+    testImplementation project(path: ':manager', configuration: 'tests')
     testImplementation libs.jedis
 
     testImplementation libs.junit.jupiter.api
