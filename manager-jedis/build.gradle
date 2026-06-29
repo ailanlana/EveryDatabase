@@ -1,0 +1,52 @@
+// Folder is 'manager-jedis'; the published artifact is 'everydatabase-manager-jedis'.
+//
+// A Jedis-based implementation of the manager's CacheSyncTransport SPI: a pub/sub
+// (Redis/Valkey) channel for cross-instance cache invalidation. It lives in its own
+// module so the client only enters the dependency graph of consumers who opt in.
+base {
+    archivesName = 'everydatabase-manager-jedis'
+}
+
+// Toolchain (Java 25) and the dual-target compileJava override (Java 17 syntax ->
+// Java 8 bytecode via Jabel) are configured centrally in the root build.gradle,
+// which lists :manager-jedis alongside :core, :libby and :manager.
+
+dependencies {
+    // compileOnly, mirroring how :manager treats :core: this add-on exposes :manager
+    // (CacheSyncTransport) and :core (ChangeEvent, ChangePayload, ChangeFeedSupport) types,
+    // kept OUT of the published POM so a consumer declares everydatabase-manager AND
+    // everydatabase-core explicitly - and gets Jedis transitively from here.
+    compileOnly project(':manager')
+    compileOnly project(':core')
+    compileOnly libs.jackson.databind
+
+    // The one real dependency this module exists to add: the Redis/Valkey client. Jedis 5.x
+    // is Java-8 bytecode and works unchanged against both Redis and Valkey (identical RESP).
+    implementation libs.jedis
+
+    // compileOnly does not reach the test classpaths, so the tests depend on the real modules
+    // directly (core brings its runtime set - H2 - which the integration test uses as the
+    // shared in-memory data backend).
+    testImplementation project(':manager')
+    testImplementation project(':core')
+    testImplementation libs.jedis
+
+    testImplementation libs.junit.jupiter.api
+    testRuntimeOnly libs.junit.jupiter.engine
+
+    // SLF4J simple binding so :core's StorageLog (and Jedis) have somewhere to write in tests.
+    testRuntimeOnly libs.slf4j.simple
+}
+
+test {
+    useJUnitPlatform()
+}
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            artifactId = 'everydatabase-manager-jedis'
+            from components.java
+        }
+    }
+}

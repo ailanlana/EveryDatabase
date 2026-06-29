@@ -24,6 +24,10 @@ lombok = "1.18.42"
 junit = "5.10.0"
 mysql = "9.4.0"
 postgresql = "42.7.7"
+# Jedis 5.2.0 is the newest stable 5.x line built for Java 8 (target 1.8 bytecode); it speaks
+# RESP and works unchanged against both Redis and Valkey. Only the everydatabase-manager-jedis
+# module depends on it (implementation scope), so it never enters other flavors' graphs.
+jedis = "5.2.0"
 instancio = "6.0.0-RC2"
 docker-compose = "0.17.21"
 shadow = "9.4.2"
@@ -50,6 +54,7 @@ junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", vers
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version = "1.10.0" }
 mysql-connector = { module = "com.mysql:mysql-connector-j", version.ref = "mysql" }
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+jedis = { module = "redis.clients:jedis", version.ref = "jedis" }
 instancio-junit = { module = "org.instancio:instancio-junit", version.ref = "instancio" }
 libby-core = { module = "net.byteflux:libby-core", version.ref = "libby" }
 

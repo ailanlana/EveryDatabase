@@ -93,7 +93,7 @@ subprojects {
 //  follow the main toolchain to 25. Everything else (Gradle itself, test
 //  compilation, test execution) runs on Java 25.
 // ======================================================================
-configure([project(':core'), project(':libby'), project(':manager')]) {
+configure([project(':core'), project(':libby'), project(':manager'), project(':manager-jedis')]) {
     dependencies {
         annotationProcessor libs.jabel
         compileOnly libs.jabel
@@ -127,8 +127,8 @@ def versionedDocs = [file('README.md')]
 // Two shapes are covered: Gradle/plain quoted coordinates, and Maven <version> tags.
 def stampEveryDatabaseVersion = { String text, String ver ->
     text
-        .replaceAll(/(["']br\.com\.finalcraft\.everydatabase:everydatabase-[a-z]+:)[^"']+(["'])/) { all, pre, post -> "${pre}${ver}${post}" }
-        .replaceAll(/(<artifactId>everydatabase-[a-z]+<\/artifactId>\s*<version>)[^<]+(<\/version>)/) { all, pre, post -> "${pre}${ver}${post}" }
+        .replaceAll(/(["']br\.com\.finalcraft\.everydatabase:everydatabase-[a-z-]+:)[^"']+(["'])/) { all, pre, post -> "${pre}${ver}${post}" }
+        .replaceAll(/(<artifactId>everydatabase-[a-z-]+<\/artifactId>\s*<version>)[^<]+(<\/version>)/) { all, pre, post -> "${pre}${ver}${post}" }
 }
 
 tasks.register('stampDocsVersions') {
