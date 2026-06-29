@@ -7,11 +7,12 @@ import br.com.finalcraft.everydatabase.changefeed.ChangePayload;
 import br.com.finalcraft.everydatabase.changefeed.ChangeSubscription;
 import br.com.finalcraft.everydatabase.manager.sync.CacheSyncTransport;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import redis.clients.jedis.DefaultJedisClientConfig;
+import redis.clients.jedis.HostAndPort;
 import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisClientConfig;
 import redis.clients.jedis.JedisPool;
-import redis.clients.jedis.JedisPoolConfig;
 import redis.clients.jedis.JedisPubSub;
-import redis.clients.jedis.Protocol;
 
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -34,10 +35,8 @@ import java.util.function.Consumer;
  */
 public final class JedisCacheSyncTransport implements CacheSyncTransport {
 
-    private final String host;
-    private final int port;
-    private final String password;
-    private final int database;
+    private final HostAndPort hostAndPort;
+    private final JedisClientConfig clientConfig;     // carries auth (user/password), db, ssl, timeouts
     private final String channel;
 
     /** Stable per-instance origin id, stamped on published signals so a consumer can skip its own. */
@@ -55,14 +54,12 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
     private volatile CountDownLatch subscribedLatch;  // counted down in onSubscribe
 
     private JedisCacheSyncTransport(JedisCacheSyncConfig config, Consumer<Throwable> errorHandler) {
-        this.host         = config.host();
-        this.port         = config.port();
-        this.password     = config.password();
-        this.database     = config.database();
+        this.hostAndPort  = new HostAndPort(config.host(), config.port());
+        this.clientConfig = clientConfig(config);
         this.channel      = config.channel();
         this.errorHandler = errorHandler;
         this.feed         = new ChangeFeedSupport(errorHandler);
-        this.publishPool  = buildPool(config);
+        this.publishPool  = new JedisPool(config.poolConfig(), hostAndPort, clientConfig);
     }
 
     /** Opens a transport for {@code config}; failures are swallowed silently (lossy by contract). */
@@ -78,14 +75,22 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
         return new JedisCacheSyncTransport(config, errorHandler);
     }
 
-    private static JedisPool buildPool(JedisCacheSyncConfig config) {
-        JedisPoolConfig poolConfig = new JedisPoolConfig();
-        boolean hasPassword = config.password() != null && !config.password().isEmpty();
-        if (hasPassword || config.database() != 0) {
-            return new JedisPool(poolConfig, config.host(), config.port(), Protocol.DEFAULT_TIMEOUT,
-                    hasPassword ? config.password() : null, config.database());
+    private static JedisClientConfig clientConfig(JedisCacheSyncConfig config) {
+        DefaultJedisClientConfig.Builder b = DefaultJedisClientConfig.builder()
+                .connectionTimeoutMillis(config.connectTimeoutMs())
+                .socketTimeoutMillis(config.socketTimeoutMs())
+                .database(config.database())
+                .ssl(config.ssl());
+        if (config.username() != null && !config.username().isEmpty()) {
+            b.user(config.username());
         }
-        return new JedisPool(poolConfig, config.host(), config.port());
+        if (config.password() != null && !config.password().isEmpty()) {
+            b.password(config.password());
+        }
+        if (config.clientName() != null && !config.clientName().isEmpty()) {
+            b.clientName(config.clientName());
+        }
+        return b.build();
     }
 
     @Override
@@ -127,9 +132,8 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
         while (running) {
             Jedis jedis = null;
             try {
-                jedis = new Jedis(host, port);   // lazy: no socket opened until the first command
-                subscriberConn = jedis;          // publish early so stop() can close a hung connect/auth
-                authenticateAndSelect(jedis);
+                jedis = new Jedis(hostAndPort, clientConfig);   // connects + auth/select/ssl from the config
+                subscriberConn = jedis;                          // publish so stop() can close it during subscribe
                 CountDownLatch latch = new CountDownLatch(1);
                 subscribedLatch = latch;
 
@@ -166,15 +170,6 @@ public final class JedisCacheSyncTransport implements CacheSyncTransport {
                 subscriberConn = null;
                 pubSub = null;
             }
-        }
-    }
-
-    private void authenticateAndSelect(Jedis jedis) {
-        if (password != null && !password.isEmpty()) {
-            jedis.auth(password);
-        }
-        if (database != 0) {
-            jedis.select(database);
         }
     }
 
