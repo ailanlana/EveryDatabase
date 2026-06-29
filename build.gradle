@@ -80,18 +80,16 @@ subprojects {
 }
 
 // ======================================================================
-//  Dual-target: Java 17 source syntax -> Java 8 bytecode (:core, :libby)
+//  Dual-target: modern Java source syntax -> Java 8 bytecode (:core, :libby, :manager, :manager-jedis)
 //
-//  Production code in these modules is written in Java 17 syntax but the
-//  published artifacts must run on a Java 8 JVM. Jabel (an annotation
-//  processor) lifts javac's source-level check so a Java 17 compiler can
-//  emit Java 8 bytecode, while `options.release = 8` keeps the *API* floor
-//  honest (no Java 9+ library APIs in production code).
+//  Production code is written in modern Java syntax but the published artifacts must run on a Java 8
+//  JVM. The FinalCraft Jabel fork (an annotation processor) lifts javac's source-level check so the
+//  Java 25 compiler can emit Java 8 bytecode, while `options.release = 8` keeps the *API* floor honest
+//  (no Java 9+ library APIs in production code).
 //
-//  Only compileJava is pinned to a Java 17 compiler: Jabel rides javac
-//  internals that changed after JDK 17, so the production compiler cannot
-//  follow the main toolchain to 25. Everything else (Gradle itself, test
-//  compilation, test execution) runs on Java 25.
+//  Unlike the upstream Jabel (which only rode javac internals up to JDK 17), the fork works on JDK 25,
+//  so production compiles on the single Java 25 toolchain - no separate JDK 17 compiler pin. Everything
+//  (Gradle, production compile, test compile, test execution) runs on Java 25.
 // ======================================================================
 configure([project(':core'), project(':libby'), project(':manager'), project(':manager-jedis')]) {
     dependencies {
@@ -100,11 +98,8 @@ configure([project(':core'), project(':libby'), project(':manager'), project(':m
     }
 
     compileJava {
-        sourceCompatibility = 17  // Java 17 *syntax* (IDE hint; Jabel lifts javac's check)
+        sourceCompatibility = 25  // modern *syntax* (IDE hint; Jabel lifts javac's source check)
         options.release = 8       // Java 8 *bytecode* and *API* floor
-        javaCompiler = javaToolchains.compilerFor {
-            languageVersion = JavaLanguageVersion.of(17)
-        }
     }
 }
 

@@ -750,7 +750,7 @@ Each manager publishes a tiny signal (collection + key + op — **never** entity
 ### Prerequisites
 
 - **JDK 25** — the only JDK you need to set up. The wrapper is Gradle 9.5.1, which launches on JDK 25 directly, and all test code compiles and runs on the Java 25 toolchain.
-  - The published artifacts still target **Java 8**: production sources are compiled by an auto-detected **JDK 17** ([Jabel](https://github.com/bsideup/jabel) lets Java 17 *syntax* emit Java 8 *bytecode*, with `--release 8` keeping the API floor honest). Gradle finds a JDK 17 in the usual locations (e.g. `~/.jdks`) or provisions one — no manual setup.
+  - The published artifacts still target **Java 8**: production sources are compiled on the same JDK 25 toolchain to Java 8 bytecode via the FinalCraft [Jabel](https://github.com/bsideup/jabel) fork (modern *syntax* → Java 8 *bytecode*, with `--release 8` keeping the API floor honest). No separate JDK 17 compiler is needed.
 - **Docker** (optional) — only for the SQL/Mongo integration suites against real servers; without it, run with `-PnoDocker`.
 
 ### Clone & build
@@ -856,7 +856,7 @@ implementation 'com.h2database:h2:2.3.232'     // Java 11+ (2.x line) — read t
 
 ### Other notes
 
-- **Build:** authored in Java 17 syntax and compiled to Java 8 via [Jabel](https://github.com/bsideup/jabel); the Gradle toolchain is **JDK 25** (Gradle 9.5 launches on JDK 25 directly).
+- **Build:** authored in modern Java syntax and compiled to Java 8 bytecode via the FinalCraft [Jabel](https://github.com/bsideup/jabel) fork on the single **JDK 25** toolchain (Gradle 9.5 launches on JDK 25 directly).
 - **Concurrency:** `StorageExecutors` uses virtual threads on Java 21+, falling back to a bounded daemon thread pool on older JVMs.
 - **Dependencies & drivers:** both flavors ship the full backend set by default — HikariCP, Jackson, Mongo driver, H2, and the MySQL + PostgreSQL JDBC drivers. With `core` you override versions via normal dependency management; `libby` downloads the full set at runtime — see [Distribution flavors](#distribution-flavors).
 - **Licensing:** this project never redistributes third-party libraries inside its own artifacts — each flavor pulls them as normal dependencies (`core`) or downloads them at runtime (`libby`). In particular `mysql-connector-j` (GPLv2 + Universal FOSS Exception) is only referenced as POM metadata (`core`) or fetched from Maven Central on the end user's machine (`libby`), never bundled.

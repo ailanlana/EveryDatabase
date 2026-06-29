@@ -4,8 +4,9 @@
 # checked by `verifyDocsVersions` (wired into `check`).
 everydatabase = "1.0.5"
 
-# Build-only annotation processor; rides javac internals so the production compiler stays pinned to JDK 17.
-jabel = "1.0.0"
+# Build-only annotation processor (FinalCraft fork): rides JDK 25's javac, so production compiles on the
+# single Java 25 toolchain and still emits Java 8 bytecode - no separate JDK 17 compiler pin needed.
+jabel = "1.2.0"
 # HikariCP 4.x is the last line built for Java 8 (5.x+ is Java 11 bytecode).
 # Kept at 4.0.3 so every backend runs on a Java 8 JVM; consumers on 11+ may
 # override to 5.x/6.x/7.x via normal dependency management.
@@ -43,7 +44,7 @@ shadow = "9.4.3"
 libby = "1.3.1"
 
 [libraries]
-jabel = { module = "com.github.bsideup.jabel:jabel-javac-plugin", version.ref = "jabel" }
+jabel = { module = "br.com.finalcraft:jabel", version.ref = "jabel" }
 hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikaricp" }
 mongodb-driver-sync = { module = "org.mongodb:mongodb-driver-sync", version.ref = "mongodb" }
 h2 = { module = "com.h2database:h2", version.ref = "h2" }
