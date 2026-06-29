@@ -141,13 +141,14 @@ public final class CacheSync implements AutoCloseable {
      * <b>precedence</b> over a native change feed and over polling, and works for any backend (including
      * feedless ones like MySQL/MariaDB). Only supported in {@link #attach(Storage)} mode.
      *
+     * <p>Works in both {@link #attach(Storage)} and {@link #auto()} mode: a single shared transport is
+     * the push source for <b>every</b> bound manager (the transport is backend-agnostic; events route by
+     * collection), so it covers managers spread across different backends with one channel.
+     *
      * <p>The transport's lifecycle is the caller's: {@link #close()} stops the subscriptions and clears
      * the publish hooks, but does not close the transport (it may be shared by several syncs).
      */
     public CacheSync via(CacheSyncTransport transport) {
-        if (autoMode) {
-            throw new IllegalStateException("via(...) is only supported in attach(storage) mode, not auto()");
-        }
         this.transport = transport;
         return this;
     }
@@ -183,8 +184,13 @@ public final class CacheSync implements AutoCloseable {
                 return this;
             }
             started = true;
-            for (Map.Entry<Storage, List<Binding<?>>> group : groupBindings().entrySet()) {
-                setupGroup(group.getKey(), group.getValue());
+            if (transport != null) {
+                // One explicit transport is the push source for every manager, in attach AND auto mode.
+                setupTransport(new ArrayList<>(bindings));
+            } else {
+                for (Map.Entry<Storage, List<Binding<?>>> group : groupBindings().entrySet()) {
+                    setupGroup(group.getKey(), group.getValue());
+                }
             }
         }
         return this;
@@ -246,16 +252,20 @@ public final class CacheSync implements AutoCloseable {
         return groups;
     }
 
+    /**
+     * Sets up the one explicit transport as the push source for every bound manager (used in both attach
+     * and auto mode; the transport is backend-agnostic and routes by collection).
+     */
+    private void setupTransport(List<Binding<?>> all) {
+        Map<String, Bound<?>> byCollection = buildByCollection(all);
+        subscriptions.add(transport.subscribe(new PushGroup(transport.originId(), byCollection)::onChange));
+        for (Binding<?> binding : all) {
+            installPublishHook(binding, transport);
+        }
+    }
+
     private void setupGroup(Storage source, List<Binding<?>> groupBindings) {
-        if (transport != null) {
-            // Explicit pub/sub transport: subscribe for incoming signals and make each manager publish
-            // on local writes. Takes precedence over a native feed and over polling.
-            Map<String, Bound<?>> byCollection = buildByCollection(groupBindings);
-            subscriptions.add(transport.subscribe(new PushGroup(transport.originId(), byCollection)::onChange));
-            for (Binding<?> binding : groupBindings) {
-                installPublishHook(binding, transport);
-            }
-        } else if (source instanceof ChangeFeedStorage) {
+        if (source instanceof ChangeFeedStorage) {
             ChangeFeedStorage feed = (ChangeFeedStorage) source;
             Map<String, Bound<?>> byCollection = buildByCollection(groupBindings);
             subscriptions.add(feed.subscribe(new PushGroup(feed.originId(), byCollection)::onChange));

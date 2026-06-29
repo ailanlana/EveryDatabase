@@ -320,9 +320,36 @@ class CacheSyncTest {
     }
 
     @Test
-    void via_is_rejected_in_auto_mode() {
+    void via_in_auto_mode_routes_a_shared_transport_across_storages() {
+        InMemoryStorage storeA = Storages.createInMemory();
+        InMemoryStorage storeB = Storages.createInMemory();
+        storeA.init().join();
+        storeB.init().join();
+        RefRegistry regA = new RefRegistry();
+        RefRegistry regB = new RefRegistry();
+        CachingManager<UUID, Guild> a = new CachingManager<>(guildDescriptor(regA, "guilds_a"), storeA, CachePolicy.always(), regA);
+        CachingManager<UUID, Guild> b = new CachingManager<>(guildDescriptor(regB, "guilds_b"), storeB, CachePolicy.always(), regB);
+
+        UUID idA = UUID.randomUUID();
+        UUID idB = UUID.randomUUID();
+        a.saveAndCache(new Guild(idA, "a")).join();
+        b.saveAndCache(new Guild(idB, "b")).join();
+
         FakeTransport transport = new FakeTransport();
-        assertThrows(IllegalStateException.class, () -> CacheSync.auto().via(transport));
+        // One shared transport in auto() mode: managers live on different storages, route by collection.
+        try (CacheSync sync = CacheSync.auto().via(transport).bind(a).bind(b).start()) {
+            assertTrue(a.peek(idA).isPresent());
+            assertTrue(b.peek(idB).isPresent());
+
+            transport.deliver(new ChangeEvent("guilds_a", idA.toString(), ChangeOp.SAVE, 1, "other"));
+            transport.deliver(new ChangeEvent("guilds_b", idB.toString(), ChangeOp.DELETE, 1, "other"));
+
+            assertFalse(a.peek(idA).isPresent(), "manager A invalidated via the shared transport");
+            assertFalse(b.peek(idB).isPresent(), "manager B evicted via the shared transport");
+        }
+
+        storeA.close().join();
+        storeB.close().join();
     }
 
     @Test
