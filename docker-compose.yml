@@ -39,6 +39,8 @@
 #   MariaDB     -> 39306    (container 3306, wire-compatible with MySQL)
 #   PostgreSQL  -> 39307    (container 5432)
 #   MongoDB     -> 39308    (container 27017)
+#   Valkey      -> 39309    (container 6379)
+#   Redis       -> 39310    (container 6379)
 #
 # ----------------------------------------------------------------------
 #  Credentials
@@ -47,6 +49,8 @@
 #                  mongodb://localhost:39308/?directConnection=true)
 #   MariaDB     -> root / root
 #   PostgreSQL  -> root / root
+#   Valkey      -> none (open)
+#   Redis       -> none (open)
 #
 # ======================================================================
 
@@ -141,6 +145,52 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # --------------------------------------------------------------------
+  #  Valkey 8  -  pub/sub transport for the manager cache-sync tests
+  #
+  #  The everydatabase-manager-jedis transport publishes cache-invalidation
+  #  signals over a Redis/Valkey pub/sub channel. Valkey is the open-source
+  #  (BSD) Redis fork; the same Jedis client connects to it unchanged.
+  #  Ephemeral - persistence is disabled (test signals are throwaway).
+  # --------------------------------------------------------------------
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    container_name: evernifecore-valkey
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "39309:6379"
+    networks:
+      - evernifecore-test
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  # --------------------------------------------------------------------
+  #  Redis 7  -  the same cache-sync transport, against upstream Redis
+  #
+  #  Pinned to 7.4 (the last BSD-3 Redis line) so the Jedis transport is
+  #  exercised against both Valkey and Redis. Ephemeral, no auth.
+  # --------------------------------------------------------------------
+  redis:
+    image: redis:7.4-alpine
+    container_name: evernifecore-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "39310:6379"
+    networks:
+      - evernifecore-test
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
 
 # ----------------------------------------------------------------------
 #  Named volumes - survive `down`, deleted with `down -v`.
