@@ -6,6 +6,8 @@ import br.com.finalcraft.everydatabase.Storages;
 import br.com.finalcraft.everydatabase.manager.CachingManager;
 import br.com.finalcraft.everydatabase.manager.RefRegistry;
 import br.com.finalcraft.everydatabase.manager.cache.CachePolicy;
+import br.com.finalcraft.everydatabase.manager.observ.CacheSyncMode;
+import br.com.finalcraft.everydatabase.manager.observ.CacheSyncObserver;
 import br.com.finalcraft.everydatabase.manager.sync.CacheSync;
 import br.com.finalcraft.everydatabase.manager.testdata.Guild;
 import br.com.finalcraft.everydatabase.modules.mongo.MongoConfig;
@@ -17,7 +19,6 @@ import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import org.bson.Document;
 import org.junit.jupiter.api.Assumptions;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import redis.clients.jedis.Jedis;
 
@@ -40,23 +41,35 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * The cache-sync analogue of {@code MultiBackendRefExampleTest}: a writer instance and a reader instance,
  * each holding a {@link Guild} cache on <b>several different backends at once</b>, all kept fresh through
- * <b>one shared Valkey/Redis transport</b> via {@link CacheSync#auto()} + {@code via(...)}. A write on any
- * backend's writer propagates to that backend's reader over the single pub/sub channel - showing that the
- * transport is backend-agnostic and routes purely by collection (V2-2).
+ * <b>one shared pub/sub transport</b> via {@link CacheSync#auto()} + {@code via(...)}. A write on any
+ * backend's writer propagates to that backend's reader over the single channel - showing the transport is
+ * backend-agnostic and routes purely by collection (V2-2).
  *
- * <p>H2 (a shared in-memory DB) always participates; MariaDB / PostgreSQL / MongoDB join when reachable.
- * Requires Valkey (the transport); self-skips otherwise. The {@link Guild} entity is reused from
- * {@code :manager}'s test classes - not recreated here.
+ * <p>Backend-agnostic over the <b>transport</b> server, mirroring {@link AbstractJedisCacheSyncTest}: a
+ * concrete subclass picks Valkey or Redis via {@link #transportPort()}/{@link #transportName()} and the
+ * suite runs against each. H2 (a shared in-memory DB) always participates as a data backend; MariaDB /
+ * PostgreSQL / MongoDB join when reachable. {@link Guild} is reused from {@code :manager}'s test classes.
  */
-@DisplayName("CacheSync over Jedis - multi-backend fan-out through one transport")
-class MultiBackendJedisCacheSyncExampleTest {
+public abstract class AbstractMultiBackendJedisCacheSyncTest {
 
-    private static final int VALKEY_PORT = 39309;
+    /** The Jedis transport server port this subclass connects to (Valkey 39309 / Redis 39310). */
+    protected abstract int transportPort();
+
+    /** Human name of the transport server (for skip messages), e.g. "Valkey"/"Redis". */
+    protected abstract String transportName();
+
+    /** Logs the cache-sync mode/connectivity during the run (audit output). */
+    private static final CacheSyncObserver LOGGING_OBSERVER = new CacheSyncObserver() {
+        @Override public void onTransportConnected() { System.out.println("[cache-sync] transport connected (push)"); }
+        @Override public void onTransportDisconnected() { System.out.println("[cache-sync] transport disconnected -> fallback polling"); }
+        @Override public void onModeChange(CacheSyncMode mode) { System.out.println("[cache-sync] mode -> " + mode); }
+    };
 
     @Test
     void one_transport_syncs_caches_across_every_available_backend() {
-        Assumptions.assumeTrue(reachable(VALKEY_PORT),
-                "Valkey not reachable on " + VALKEY_PORT + " - run 'docker compose up -d valkey'. Skipping.");
+        Assumptions.assumeTrue(reachable(transportPort()),
+                transportName() + " not reachable on " + transportPort() + " - run 'docker compose up -d "
+                        + transportName().toLowerCase() + "'. Skipping.");
 
         String suffix = UUID.randomUUID().toString().replace("-", "");
         String channel = "everydatabase:mbex:" + suffix;
@@ -67,11 +80,11 @@ class MultiBackendJedisCacheSyncExampleTest {
         List<CachingManager<UUID, Guild>> readers = new ArrayList<>();
 
         JedisCacheSyncTransport writerTransport = JedisCacheSyncTransport.connect(
-                new JedisCacheSyncConfig("localhost", VALKEY_PORT).withChannel(channel));
+                new JedisCacheSyncConfig("localhost", transportPort()).withChannel(channel));
         JedisCacheSyncTransport readerTransport = JedisCacheSyncTransport.connect(
-                new JedisCacheSyncConfig("localhost", VALKEY_PORT).withChannel(channel));
-        CacheSync writerSync = CacheSync.auto().via(writerTransport);
-        CacheSync readerSync = CacheSync.auto().via(readerTransport);
+                new JedisCacheSyncConfig("localhost", transportPort()).withChannel(channel));
+        CacheSync writerSync = CacheSync.auto().via(writerTransport).observe(LOGGING_OBSERVER);
+        CacheSync readerSync = CacheSync.auto().via(readerTransport).observe(LOGGING_OBSERVER);
 
         try {
             for (Backend backend : backends) {
@@ -91,7 +104,6 @@ class MultiBackendJedisCacheSyncExampleTest {
             writerSync.start();
             readerSync.start();
 
-            // For each backend: a write on the writer propagates to the reader through the one shared channel.
             for (int i = 0; i < backends.size(); i++) {
                 CachingManager<UUID, Guild> writer = writers.get(i);
                 CachingManager<UUID, Guild> reader = readers.get(i);
@@ -127,7 +139,6 @@ class MultiBackendJedisCacheSyncExampleTest {
     //  Backend discovery
     // ------------------------------------------------------------------
 
-    /** A named backend and a factory that opens a fresh storage instance on it. */
     private static final class Backend {
         final String name;
         final Supplier<Storage> open;
@@ -137,7 +148,6 @@ class MultiBackendJedisCacheSyncExampleTest {
     private static List<Backend> availableBackends(String suffix) {
         List<Backend> backends = new ArrayList<>();
 
-        // H2: a single shared in-memory DB (same URL = same DB in this JVM), so writer and reader share data.
         String h2Url = "jdbc:h2:mem:mbex_" + suffix + ";DB_CLOSE_DELAY=-1";
         backends.add(new Backend("h2", () -> Storages.createH2(new SqlConfig(h2Url, "", ""))));
 
@@ -227,8 +237,6 @@ class MultiBackendJedisCacheSyncExampleTest {
             return false;
         }
     }
-
-    // ------------------------------------------------------------------
 
     private static void awaitUntil(BooleanSupplier condition, Duration timeout, String label) {
         long deadline = System.currentTimeMillis() + timeout.toMillis();

@@ -1,10 +1,11 @@
-package br.com.finalcraft.everydatabase.manager.sync.jedis;
+package br.com.finalcraft.everydatabase.manager.sync.jedis.modules.valkey;
 
+import br.com.finalcraft.everydatabase.manager.sync.jedis.AbstractJedisCacheSyncTest;
 import org.junit.jupiter.api.DisplayName;
 
 /**
- * The Jedis cache-sync contract against <b>Valkey</b> (the BSD Redis fork). Self-skips when the
- * Valkey container is down. Connects to the {@code docker-compose} valkey service on port 39309.
+ * The Jedis cache-sync contract against <b>Valkey</b> (the BSD Redis fork, port 39309). Self-skips when
+ * the Valkey container is down.
  */
 @DisplayName("CacheSync over Jedis - Valkey")
 class ValkeyCacheSyncTest extends AbstractJedisCacheSyncTest {

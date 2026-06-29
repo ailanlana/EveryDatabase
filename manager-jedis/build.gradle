@@ -42,6 +42,9 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // A plain `:manager-jedis:test` run always surfaces the audit logs (StorageLog via slf4j-simple +
+    // the cache-sync observer) on the console - Gradle captures test stdout by default, so opt in.
+    testLogging.showStandardStreams = true
     // Keep logging/observability ON during tests so runs emit proper logs (mirrors :core).
     systemProperty 'everydatabase.log.level',                  'info'
     systemProperty 'org.slf4j.simpleLogger.defaultLogLevel',   'warn'
