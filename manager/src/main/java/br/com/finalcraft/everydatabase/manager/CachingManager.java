@@ -248,6 +248,57 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     }
 
     // ------------------------------------------------------------------
+    //  Cache-aware reads (extras over the RefResolver primitives)
+    // ------------------------------------------------------------------
+
+    /**
+     * Cache-then-backend existence check: a live, serveable cached cell answers {@code true} with no
+     * I/O; otherwise the backend is consulted via {@link Repository#exists}. Cheaper than
+     * {@link #resolve} (it never loads the entity body) and cache-aware unlike
+     * {@code repository().exists}.
+     *
+     * <p>A local miss, stale entry, or <b>tombstone</b> is <em>not</em> treated as an authoritative
+     * {@code false} - a concurrent re-save on another instance may exist - so a negative always
+     * confirms against the backend.
+     *
+     * <p>The cache consultation goes through the store's LRU read, which in bounded mode promotes the
+     * key to most-recently-used - the same caveat as {@link #isCached(Object)}.
+     */
+    public CompletableFuture<Boolean> exists(K key) {
+        if (serveable(store.get(key), options.policy())) {
+            statHits.increment();
+            return CompletableFuture.completedFuture(Boolean.TRUE);
+        }
+        statMisses.increment();
+        return repository.exists(key);
+    }
+
+    /**
+     * Force-reloads {@code key} from the backend <b>now</b> and updates the cached cell in place,
+     * completing with the freshly loaded value - or {@code null} when the entity no longer exists, in
+     * which case the cell becomes a stamp-ordered tombstone (so a memoized {@code Ref} sees it gone).
+     * Use it after an out-of-band edit when you can't wait for a TTL to lapse or for a lazy
+     * {@link #invalidate(Object)} to take effect on the next read.
+     *
+     * <p><b>Discards unsaved changes.</b> A refresh overwrites the cell unconditionally: if the cached
+     * value is dirty (write-back), its in-memory changes are lost. {@link #flushDirty()} first if they
+     * matter - a lazy {@code invalidate} preserves a dirty cell on purpose, {@code refresh} does not.
+     */
+    public CompletableFuture<V> refresh(K key) {
+        final long stamp = stampGen.incrementAndGet();
+        return repository.find(key)
+                .whenComplete((opt, ex) -> { if (ex != null) statLoadFailure.increment(); })
+                .thenApply(opt -> {
+                    if (!opt.isPresent()) {
+                        store.tombstone(key, stamp);   // reflect an out-of-band delete
+                        return null;
+                    }
+                    statLoadSuccess.increment();
+                    return updateInPlace(key, opt.get(), stamp).getValue();
+                });
+    }
+
+    // ------------------------------------------------------------------
     //  Writes (write-through) + invalidation
     // ------------------------------------------------------------------
 
@@ -318,6 +369,24 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
      */
     public V seedIfAbsent(K key, V value) {
         return store.installColdMiss(key, value, stampGen.incrementAndGet()).getValue();
+    }
+
+    /**
+     * Returns the entity for {@code key}, computing and caching a default when it is absent both in
+     * the cache and the backend - the "create on first access" pattern (e.g. a profile on first
+     * login) without the {@code resolve -> build default -> seedIfAbsent} boilerplate.
+     *
+     * <p>On a miss {@code factory} is applied to the key and the result is installed via
+     * {@link #seedIfAbsent}, so concurrent callers converge on one cached instance (the factory may
+     * run more than once but only one instance wins - keep it side-effect free).
+     *
+     * <p><b>Not write-through.</b> A computed default lives only in the cache until it is persisted by
+     * {@link #saveAndCache(Object)} / {@link #saveAllAndCache(Collection)} / {@link #flushDirty()};
+     * {@code getOrCompute} itself performs no write.
+     */
+    public CompletableFuture<V> getOrCompute(K key, Function<K, V> factory) {
+        return resolveCell(key, options.policy()).thenApply(cell ->
+                cell != null ? cell.getValue() : seedIfAbsent(key, factory.apply(key)));
     }
 
     /**
@@ -482,6 +551,30 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
         }
     }
 
+    /**
+     * Evicts a known subset of keys, dropping each cell outright - the bulk counterpart of
+     * {@link #evict(Object)} for the cache-sync/admin path that already knows the keys, without nuking
+     * the whole cache ({@link #clearCache()}) or looping in caller code. Keys not cached are ignored.
+     */
+    public void evictAll(Collection<K> keys) {
+        for (K key : keys) {
+            statEvictions.increment();
+            store.remove(key);
+        }
+    }
+
+    /**
+     * Marks a known subset of keys stale (each reloads on its next read) - the bulk counterpart of
+     * {@link #invalidate(Object)}, and the non-destructive sibling of {@link #evictAll(Collection)}:
+     * it keeps the cells, so a dirty write-back cell is preserved. Keys not cached are ignored.
+     */
+    public void invalidateAll(Collection<K> keys) {
+        for (K key : keys) {
+            statInvalidations.increment();
+            store.markStale(key);
+        }
+    }
+
     /** Empties the cache. */
     public void clearCache() {
         store.clear();
@@ -536,6 +629,20 @@ public class CachingManager<K, V> implements RefResolver<K, V> {
     /** Current number of <b>live</b> cached entries (tombstones from deletes are not counted). */
     public int cachedSize() {
         return store.liveCount();
+    }
+
+    /**
+     * Whether {@code key} currently has a cell the default policy would serve (live, non-tombstone,
+     * non-evicted, and fresh-or-dirty) - i.e. a read would hit the cache. A pure predicate: no backend
+     * I/O and no effect on the hit/miss metrics.
+     *
+     * <p><b>Caveat (bounded caches):</b> the lookup goes through the store's LRU read, which in bounded
+     * mode counts as an access and promotes the key to most-recently-used - calling this in a hot loop
+     * over many keys can pin them. Negligible for an unbounded cache. Intended for metrics/tests, not
+     * hot paths.
+     */
+    public boolean isCached(K key) {
+        return serveable(store.get(key), options.policy());
     }
 
     /**

@@ -375,6 +375,189 @@ class CachingManagerTest {
         assertTrue(ex.getCause() instanceof IllegalStateException);
     }
 
+    // ------------------------------------------------------------------
+    //  refresh (force-reload now)
+    // ------------------------------------------------------------------
+
+    @Test
+    void refresh_force_reloads_the_current_backend_value_into_the_cached_cell() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Old");
+        mgr.resolve(id).join();                                   // cached "Old"
+
+        mgr.repository().save(new Guild(id, "New")).join();       // out-of-band edit, cache untouched
+        assertEquals("Old", mgr.peek(id).get().getName(), "the cache still serves the stale value");
+
+        Guild refreshed = mgr.refresh(id).join();
+
+        assertEquals("New", refreshed.getName(), "refresh returns the current backend value");
+        assertSame(refreshed, mgr.peek(id).get(), "the cell is updated in place to the canonical instance");
+    }
+
+    @Test
+    void refresh_tombstones_when_the_entity_was_deleted_out_of_band() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Doomed");
+        mgr.resolve(id).join();
+
+        mgr.repository().delete(id).join();                       // out-of-band delete
+
+        assertNull(mgr.refresh(id).join(), "refresh of a deleted entity completes with null");
+        assertFalse(mgr.peek(id).isPresent(), "...and the cell becomes a tombstone");
+        assertEquals(0, mgr.cachedSize());
+    }
+
+    // ------------------------------------------------------------------
+    //  evictAll / invalidateAll (known subset)
+    // ------------------------------------------------------------------
+
+    @Test
+    void evictAll_drops_only_the_given_subset() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID a = seedGuild(mgr, "A");
+        UUID b = seedGuild(mgr, "B");
+        UUID c = seedGuild(mgr, "C");
+        mgr.getAll(Arrays.asList(a, b, c)).join();                // cache all three
+        assertEquals(3, mgr.cachedSize());
+
+        mgr.evictAll(Arrays.asList(a, b, UUID.randomUUID()));   // an uncached key in the list is ignored
+
+        assertEquals(1, mgr.cachedSize());
+        assertFalse(mgr.peek(a).isPresent());
+        assertFalse(mgr.peek(b).isPresent());
+        assertTrue(mgr.peek(c).isPresent(), "an un-listed key is untouched");
+    }
+
+    @Test
+    void invalidateAll_subset_marks_only_those_stale_keeping_the_cells() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID a = seedGuild(mgr, "A");
+        UUID b = seedGuild(mgr, "B");
+        mgr.getAll(Arrays.asList(a, b)).join();
+
+        mgr.invalidateAll(Collections.singletonList(a));
+
+        assertFalse(mgr.peek(a).isPresent(), "stale entry is not served");
+        assertTrue(mgr.peek(b).isPresent(), "an un-listed key stays fresh");
+        assertEquals(2, mgr.cachedSize(), "invalidate keeps the cells (stale, not removed)");
+        assertTrue(mgr.resolve(a).join().isPresent(), "a stale key reloads on the next read");
+    }
+
+    // ------------------------------------------------------------------
+    //  exists (cache-then-backend)
+    // ------------------------------------------------------------------
+
+    @Test
+    void exists_answers_a_cache_hit_without_consulting_the_backend() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Live");
+        mgr.resolve(id).join();                                   // cached, live, fresh
+
+        mgr.repository().delete(id).join();                       // gone from the backend, cell intact
+
+        assertTrue(mgr.exists(id).join(), "a live cached cell answers true without hitting the backend");
+    }
+
+    @Test
+    void exists_does_not_treat_a_local_tombstone_as_authoritative_absence() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Doomed");
+        mgr.resolve(id).join();
+
+        mgr.deleteAndEvict(id).join();                            // local tombstone + backend delete
+        assertFalse(mgr.exists(id).join(), "gone everywhere");
+
+        mgr.repository().save(new Guild(id, "Resurrected")).join();   // another instance re-saves
+        assertTrue(mgr.exists(id).join(),
+                "a stale local tombstone must not mask a backend re-save - negatives confirm against the backend");
+    }
+
+    @Test
+    void exists_falls_back_to_the_backend_for_an_uncached_key() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Present");                      // in the backend, never cached
+        assertEquals(0, mgr.cachedSize());
+
+        assertTrue(mgr.exists(id).join());
+        assertFalse(mgr.exists(UUID.randomUUID()).join(), "an unknown key is absent");
+    }
+
+    // ------------------------------------------------------------------
+    //  getOrCompute (read-or-seed default)
+    // ------------------------------------------------------------------
+
+    @Test
+    void getOrCompute_returns_the_existing_entity_and_never_runs_the_factory() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Knights");
+        Guild cached = mgr.resolve(id).join().get();
+
+        Guild got = mgr.getOrCompute(id, k -> { throw new AssertionError("factory must not run on a hit"); }).join();
+
+        assertSame(cached, got, "returns the canonical cached instance");
+        assertEquals("Knights", got.getName());
+    }
+
+    @Test
+    void getOrCompute_loads_an_entity_present_only_in_the_backend_without_running_the_factory() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Knights");                      // in the backend, never cached
+        assertFalse(mgr.isCached(id));
+
+        Guild got = mgr.getOrCompute(id, k -> { throw new AssertionError("factory must not run when the backend has it"); }).join();
+
+        assertEquals("Knights", got.getName());
+        assertSame(got, mgr.peek(id).get(), "the loaded entity is cached as the canonical instance");
+    }
+
+    @Test
+    void getOrCompute_seeds_a_default_on_a_miss_without_writing_through() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = UUID.randomUUID();                              // absent in cache and backend
+
+        Guild created = mgr.getOrCompute(id, k -> new Guild(k, "Newbie")).join();
+
+        assertEquals("Newbie", created.getName());
+        assertSame(created, mgr.peek(id).get(), "the computed default is cached as the canonical instance");
+        assertFalse(mgr.repository().find(id).join().isPresent(),
+                "getOrCompute is not write-through - the default stays in cache until explicitly saved");
+    }
+
+    // ------------------------------------------------------------------
+    //  isCached (serveable predicate)
+    // ------------------------------------------------------------------
+
+    @Test
+    void isCached_reflects_the_serveable_state() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Hot");
+        assertFalse(mgr.isCached(id), "not cached before the first read");
+
+        mgr.resolve(id).join();
+        assertTrue(mgr.isCached(id), "a live, fresh cell is serveable");
+
+        mgr.invalidate(id);
+        assertFalse(mgr.isCached(id), "a stale cell is not serveable");
+
+        mgr.resolve(id).join();
+        mgr.deleteAndEvict(id).join();
+        assertFalse(mgr.isCached(id), "a tombstone is not serveable");
+    }
+
+    @Test
+    void isCached_does_not_disturb_the_hit_miss_metrics() {
+        CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());
+        UUID id = seedGuild(mgr, "Hot");
+        mgr.resolve(id).join();
+        mgr.resetStats();
+
+        mgr.isCached(id);
+        mgr.isCached(UUID.randomUUID());
+
+        assertEquals(0, mgr.stats().hitCount(), "isCached is a pure predicate - it must not count as a hit");
+        assertEquals(0, mgr.stats().missCount(), "...nor as a miss");
+    }
+
     @Test
     void concurrent_resolve_save_invalidate_stay_consistent() throws Exception {
         CachingManager<UUID, Guild> mgr = manager(CachePolicy.always());

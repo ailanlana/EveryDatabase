@@ -189,6 +189,38 @@ class DirtyTrackingCachingManagerTest {
         assertFalse(mgr.peek(conflictId).isPresent(), "a conflict evicts the stale cell (reload on next read)");
     }
 
+    @Test
+    void refresh_discards_unsaved_dirty_changes() {
+        CachingManager<UUID, Bank> mgr = manager();
+        UUID id = UUID.randomUUID();
+        mgr.repository().save(new Bank(id, 0)).join();   // the backend has balance 0
+
+        Bank account = mgr.resolve(id).join().get();     // cached, clean
+        account.deposit(50);                                         // unsaved local change -> dirty
+        assertTrue(account.isDirty());
+
+        Bank refreshed = mgr.refresh(id).join();         // force-reload over the dirty cell
+
+        assertEquals(0, refreshed.getCoins(), "refresh reloads the backend value, dropping the unsaved +50");
+        assertEquals(0, mgr.peek(id).get().getCoins(), "the cached cell now serves the reloaded value");
+        assertFalse(mgr.peek(id).get().isDirty(), "the freshly loaded instance is clean");
+    }
+
+    @Test
+    void invalidateAll_subset_preserves_a_dirty_write_back_cell() {
+        CachingManager<UUID, Bank> mgr = manager();
+        UUID id = UUID.randomUUID();
+        Bank account = mgr.seedIfAbsent(id, new Bank(id, 0));
+        account.deposit(50);                                         // unsaved local change -> dirty
+        assertTrue(account.isDirty());
+
+        mgr.invalidateAll(Collections.singletonList(id));           // would force a reload on a clean cell...
+
+        // ...but a dirty cell wins: the same instance with the unsaved change is still served.
+        assertSame(account, mgr.peek(id).get());
+        assertEquals(50, mgr.peek(id).get().getCoins());
+    }
+
     // ------------------------------------------------------------------
     //  @DirtyFlag annotation form (no IDirtyable interface)
     // ------------------------------------------------------------------
